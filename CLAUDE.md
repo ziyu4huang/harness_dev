@@ -35,6 +35,11 @@ source scripts/claude-code-origin.sh         # clean Anthropic env
 # Workflow({ name: 'deepseek-cli-self-improve', args: { iterations: 3 } })
 # Metrics history persisted at: dist/deepseek-cli-metrics-history.json
 
+# demo-bun-image self-improvement workflow
+# Workflow({ name: 'demo-bun-image-self-improve' })
+# Workflow({ name: 'demo-bun-image-self-improve', args: { iterations: 3 } })
+# Metrics history persisted at: dist/demo-bun-image-metrics-history.json
+
 # Start SurrealDB
 ./scripts/run_surreal.sh
 ```
@@ -46,6 +51,19 @@ This is a **personal dev tooling harness** — a monorepo (npm workspaces, Bun r
 - **Hosts ~13 agent skills** mirrored from [mattpocock/skills](https://github.com/mattpocock/skills) with lockfile-verified content hashes
 - **Provides CLI tools** (DeepSeek CLI via Vercel AI SDK, DrawThings config benchmarker, SurrealDB launcher)
 - **Configures an OpenCode multi-agent workspace** (`.opencode/`) with 25+ agents across coding, office, and content domains
+
+### Monorepo workspace layout
+
+The root `package.json` declares `"workspaces": ["bun_apps/*"]`. Bun hoists all dependencies to a single root `node_modules/` — individual `bun_apps/*/node_modules` directories should **not** exist. Key implications:
+
+- **One install for all apps** — run `bun install` at root only. All workspace packages share the same dependency tree.
+- **No per-app `node_modules`** — if you see `bun_apps/<app>/node_modules`, delete it; it means something ran a nested install by mistake.
+- **Adding a new app** — create `bun_apps/<name>/package.json` (with `"private": true`), add dependencies there, then `bun install` at root.
+- **Cross-app imports** — workspace packages can reference each other by name if listed as dependencies, but currently each app is standalone.
+
+Current workspace packages:
+- `bun_apps/deepseek-cli` — DeepSeek LLM CLI via Vercel AI SDK (`@ai-sdk/openai`, `ai`, `mathjs`, `zod`)
+- `bun_apps/hello-bun` — Minimal hello-world CLI (no dependencies)
 
 ### Provider abstraction pattern
 
