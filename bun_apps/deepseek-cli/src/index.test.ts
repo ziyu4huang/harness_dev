@@ -120,6 +120,34 @@ describe("deepseek-cli", () => {
     expect(exitCode).toBe(1);
   });
 
+  it("--timeout requires a value", async () => {
+    const { stderr, exitCode } = await readOutput(
+      Bun.spawn([...CLI, "--timeout", "--model", "pro", "hello"], STDIO),
+    );
+    expect(stderr).toContain("--timeout requires");
+    expect(exitCode).toBe(1);
+  });
+
+  it("--timeout rejects non-positive values", async () => {
+    const { stderr, exitCode } = await readOutput(
+      Bun.spawn([...CLI, "--timeout", "0", "--model", "pro", "hello"], STDIO),
+    );
+    expect(stderr).toContain("positive integer");
+    expect(exitCode).toBe(1);
+  });
+
+  it("--timeout accepts valid values", async () => {
+    const { stderr, exitCode } = await readOutput(
+      Bun.spawn([...CLI, "--timeout", "120000", "--model", "pro", "hello"], {
+        ...STDIO,
+        env: { ...process.env, DEEPSEEK_API_KEY: "" },
+      }),
+    );
+    // Will fail on missing API key, but NOT on --timeout parsing
+    expect(stderr).toContain("DEEPSEEK_API_KEY");
+    expect(exitCode).toBe(1);
+  });
+
   it("--version prints version and exits 0", async () => {
     const { stdout, exitCode } = await readOutput(
       Bun.spawn([...CLI, "--version"], STDIO),
@@ -400,5 +428,14 @@ describe("grep_search tool", () => {
     const matchLines = result.split("\n").filter((l: string) => l.includes("match line"));
     expect(matchLines.length).toBe(5);
     expect(result).toContain("truncated");
+  });
+
+  it("returns specific error for invalid regex pattern", async () => {
+    await writeFile(path.join(TEMP_ROOT, "regex_test.txt"), "some text");
+    const result = await toolExecutors.grep_search({
+      pattern: "[invalid",
+      glob: path.join(TEMP_ROOT, "*.txt"),
+    });
+    expect(result).toContain("invalid regex pattern");
   });
 });

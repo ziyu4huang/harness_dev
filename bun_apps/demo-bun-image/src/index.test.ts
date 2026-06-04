@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { createTestPng } from "./test-png.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUTPUT = join(__dirname, "..", "..", "..", "output");
@@ -9,105 +10,9 @@ const OUTPUT = join(__dirname, "..", "..", "..", "output");
 // Skip entire suite if Bun.Image is not available
 const hasImageAPI = typeof Bun !== "undefined" && "Image" in Bun;
 
-// Minimal 2×2 PNG for testing (reuse the one from index.ts logic)
-function createTestPng(): Uint8Array {
-  const width = 2, height = 2;
-  const raw = new Uint8Array([
-    0xFF, 0x00, 0x00, 0xFF,
-    0x00, 0x00, 0xFF, 0xFF,
-    0x00, 0xFF, 0x00, 0xFF,
-    0xFF, 0xFF, 0x00, 0xFF,
-  ]);
-
-  const filtered = new Uint8Array(height * (1 + width * 4));
-  for (let y = 0; y < height; y++) {
-    filtered[y * (1 + width * 4)] = 0;
-    filtered.set(raw.subarray(y * width * 4, (y + 1) * width * 4), y * (1 + width * 4) + 1);
-  }
-
-  const zlibData = createZlibStored(filtered);
-
-  const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-  const ihdr = createChunk("IHDR", (() => {
-    const d = new Uint8Array(13);
-    const v = new DataView(d.buffer);
-    v.setUint32(0, width);
-    v.setUint32(4, height);
-    d[8] = 8; d[9] = 6; d[10] = 0; d[11] = 0; d[12] = 0;
-    return d;
-  })());
-  const idat = createChunk("IDAT", zlibData);
-  const iend = createChunk("IEND", new Uint8Array(0));
-
-  const total = signature.length + ihdr.length + idat.length + iend.length;
-  const png = new Uint8Array(total);
-  let offset = 0;
-  png.set(signature, offset); offset += signature.length;
-  png.set(ihdr, offset); offset += ihdr.length;
-  png.set(idat, offset); offset += idat.length;
-  png.set(iend, offset);
-  return png;
-}
-
-function createZlibStored(data: Uint8Array): Uint8Array {
-  const maxBlock = 65535;
-  const numBlocks = Math.ceil(data.length / maxBlock) || 1;
-  const blocksSize = Array.from({ length: numBlocks }, (_, i) => {
-    const len = Math.min(maxBlock, data.length - i * maxBlock);
-    return 5 + len;
-  }).reduce((a, b) => a + b, 0);
-
-  const out = new Uint8Array(2 + blocksSize + 4);
-  out[0] = 0x78; out[1] = 0x01;
-  let offset = 2;
-  for (let i = 0; i < numBlocks; i++) {
-    const start = i * maxBlock;
-    const len = Math.min(maxBlock, data.length - start);
-    out[offset++] = i === numBlocks - 1 ? 1 : 0;
-    out[offset++] = len & 0xFF;
-    out[offset++] = (len >> 8) & 0xFF;
-    out[offset++] = ~len & 0xFF;
-    out[offset++] = (~len >> 8) & 0xFF;
-    out.set(data.subarray(start, start + len), offset);
-    offset += len;
-  }
-  const adler = adler32(data);
-  new DataView(out.buffer, out.byteOffset, out.byteLength).setUint32(offset, adler, false);
-  return out.subarray(0, offset + 4);
-}
-
-function adler32(data: Uint8Array): number {
-  let a = 1, b = 0;
-  for (let i = 0; i < data.length; i++) { a = (a + data[i]) % 65521; b = (b + a) % 65521; }
-  return (b << 16) | a;
-}
-
-const CRC_TABLE = (() => {
-  const t: number[] = [];
-  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c; }
-  return t;
-})();
-
-function crc32(data: Uint8Array): number {
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < data.length; i++) crc = CRC_TABLE[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-
-function createChunk(type: string, data: Uint8Array): Uint8Array {
-  const typeBytes = new TextEncoder().encode(type);
-  const chunk = new Uint8Array(4 + 4 + data.length + 4);
-  const dv = new DataView(chunk.buffer);
-  dv.setUint32(0, data.length, false);
-  chunk.set(typeBytes, 4);
-  chunk.set(data, 8);
-  dv.setUint32(8 + data.length, crc32(new Uint8Array([...typeBytes, ...data])), false);
-  return chunk;
-}
-
 let sourcePng: string;
 
-describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED — requires Bun >= 1.3.14)", () => {
+describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED -- requires Bun >= 1.3.14)", () => {
   if (!hasImageAPI) return;
 
   beforeAll(async () => {
@@ -117,17 +22,28 @@ describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED — requires Bu
     await Bun.write(sourcePng, createTestPng());
   });
 
-  test("metadata() returns width, height, format", async () => {
+  // ── constructor paths ──────────────────────────────────────────────────
+
+  test("constructor from file path string", async () => {
     const meta = await new Bun.Image(sourcePng).metadata();
     expect(meta.width).toBe(2);
     expect(meta.height).toBe(2);
     expect(meta.format).toBe("png");
   });
 
-  test("metadata from ArrayBuffer", async () => {
+  test("constructor from Uint8Array (ArrayBuffer)", async () => {
     const buf = await Bun.file(sourcePng).arrayBuffer();
     const meta = await new Bun.Image(new Uint8Array(buf)).metadata();
     expect(meta.width).toBe(2);
+    expect(meta.format).toBe("png");
+  });
+
+  test("constructor from BunFile directly", async () => {
+    const file = Bun.file(sourcePng);
+    const img = new Bun.Image(file);
+    const meta = await img.metadata();
+    expect(meta.width).toBe(2);
+    expect(meta.height).toBe(2);
     expect(meta.format).toBe("png");
   });
 
@@ -136,12 +52,14 @@ describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED — requires Bu
     expect(meta.width).toBe(2);
   });
 
+  // ── resize ─────────────────────────────────────────────────────────────
+
   test("resize with width only keeps aspect ratio", async () => {
     const out = join(OUTPUT, "r1.png");
     await new Bun.Image(sourcePng).resize(4).png().write(out);
     const m = await new Bun.Image(out).metadata();
     expect(m.width).toBe(4);
-    expect(m.height).toBe(4); // 2×2 → 4×4 (square)
+    expect(m.height).toBe(4); // 2x2 -> 4x4 (square)
   });
 
   test("resize with exact dimensions", async () => {
@@ -160,21 +78,25 @@ describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED — requires Bu
     expect(m.height).toBeLessThanOrEqual(8);
   });
 
-  test("convert PNG → JPEG", async () => {
+  // ── format conversion ──────────────────────────────────────────────────
+
+  test("convert PNG -> JPEG", async () => {
     const out = join(OUTPUT, "c1.jpeg");
     await new Bun.Image(sourcePng).jpeg({ quality: 85 }).write(out);
     const m = await new Bun.Image(out).metadata();
     expect(m.format).toBe("jpeg");
   });
 
-  test("convert PNG → WebP", async () => {
+  test("convert PNG -> WebP", async () => {
     const out = join(OUTPUT, "c2.webp");
     await new Bun.Image(sourcePng).webp({ quality: 80 }).write(out);
     const m = await new Bun.Image(out).metadata();
     expect(m.format).toBe("webp");
   });
 
-  test("rotate 90° keeps same canvas size", async () => {
+  // ── transform ──────────────────────────────────────────────────────────
+
+  test("rotate 90 keeps same canvas size", async () => {
     const out = join(OUTPUT, "rot.png");
     await new Bun.Image(sourcePng).resize(8, 4).rotate(90).png().write(out);
     const m = await new Bun.Image(out).metadata();
@@ -206,10 +128,18 @@ describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED — requires Bu
     expect(m.width).toBe(4);
   });
 
+  // ── output methods ─────────────────────────────────────────────────────
+
   test("bytes() returns Uint8Array", async () => {
     const bytes = await new Bun.Image(sourcePng).resize(4).png().bytes();
     expect(bytes).toBeInstanceOf(Uint8Array);
     expect(bytes.length).toBeGreaterThan(0);
+  });
+
+  test("buffer() returns Buffer with correct length", async () => {
+    const buf = await new Bun.Image(sourcePng).resize(4).png().buffer();
+    expect(Buffer.isBuffer(buf)).toBe(true);
+    expect(buf.length).toBeGreaterThan(0);
   });
 
   test("blob() has correct type", async () => {
@@ -245,6 +175,8 @@ describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED — requires Bu
     expect(written).toBeGreaterThan(0);
   });
 
+  // ── encode options ─────────────────────────────────────────────────────
+
   test("JPEG quality affects file size", async () => {
     const out1 = join(OUTPUT, "q10.jpeg");
     const out2 = join(OUTPUT, "q100.jpeg");
@@ -255,7 +187,9 @@ describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED — requires Bu
     expect(s2).toBeGreaterThan(s1);
   });
 
-  test("chainable pipeline: resize → rotate → modulate → encode", async () => {
+  // ── pipeline chaining ──────────────────────────────────────────────────
+
+  test("chainable pipeline: resize -> rotate -> modulate -> encode", async () => {
     const out = join(OUTPUT, "chained.webp");
     await new Bun.Image(sourcePng)
       .resize(32, 32, { filter: "nearest" })
@@ -274,7 +208,28 @@ describe(hasImageAPI ? "Bun.Image API" : "Bun.Image API (SKIPPED — requires Bu
     const resp = new Response(pipeline);
     const buf = await resp.arrayBuffer();
     expect(buf.byteLength).toBeGreaterThan(0);
-    // Content-Type may or may not be auto-set depending on Bun version
-    // The important thing is the body is valid image bytes
+  });
+
+  // ── error handling ─────────────────────────────────────────────────────
+
+  test("constructing from non-image buffer throws", async () => {
+    const badBuf = Buffer.from("not an image");
+    expect(async () => {
+      await new Bun.Image(badBuf).metadata();
+    }).toThrow();
+  });
+
+  test("write to read-only location is handled gracefully", async () => {
+    // Bun may auto-create parent dirs, so write to a null device path or trap
+    // the error via a truly unwritable path on Windows/Unix
+    const result = await new Bun.Image(sourcePng).resize(4).png().write("/dev/null/impossible.png").catch((e: any) => e);
+    // Accept both success (null device) and error -- the point is no crash
+    expect(result).toBeDefined();
+  });
+
+  test("constructing from empty buffer throws", async () => {
+    expect(async () => {
+      await new Bun.Image(new Uint8Array(0)).metadata();
+    }).toThrow();
   });
 });

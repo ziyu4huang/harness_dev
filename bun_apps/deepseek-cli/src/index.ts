@@ -21,14 +21,18 @@ import { mkdir } from "fs/promises";
 import { dirname } from "path";
 import { readFileSync } from "fs";
 
-const VERSION: string = (() => {
-  try {
-    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-    return pkg.version || "0.0.0";
-  } catch {
-    return "0.0.0";
+let _version: string | undefined;
+function getVersion(): string {
+  if (!_version) {
+    try {
+      const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+      _version = pkg.version || "0.0.0";
+    } catch {
+      _version = "0.0.0";
+    }
   }
-})();
+  return _version;
+}
 
 // ─── Math evaluator ────────────────────────────────────────────────────────
 
@@ -82,6 +86,7 @@ Usage:
 Options:
   --model <name>    Model: pro | flash (default: pro)
   --max-steps <n>   Max agent loop steps (default: 10, env: DEEPSEEK_MAX_STEPS)
+  --timeout <ms>    API call timeout in ms (default: 60000, env: DEEPSEEK_TIMEOUT)
   --agent, -a       Enable agent mode with tool calling
   -v, --version     Print version and exit
   -h, --help        Show this help message
@@ -229,8 +234,13 @@ export const toolExecutors = {
     maxResults?: number;
   }) => {
     try {
+      let regex: RegExp;
+      try {
+        regex = new RegExp(pattern);
+      } catch {
+        return `Error: invalid regex pattern "${pattern}"`;
+      }
       const g = new Bun.Glob(glob);
-      const regex = new RegExp(pattern);
       const results: string[] = [];
       let skippedFiles = 0;
       for await (const file of g.scan({ absolute: true })) {
@@ -277,11 +287,11 @@ const TOOL_DEFINITIONS: Record<string, {
     type: "function",
     function: {
       name: "calculator",
-      description: "Evaluate a math expression",
+      description: "Evaluate math expression",
       parameters: {
         type: "object",
         properties: {
-          expression: { type: "string", description: "Math expression, e.g. '2+2*3'" },
+          expression: { type: "string", description: "Math expression, e.g. 2+2*3" },
         },
         required: ["expression"],
       },
@@ -291,7 +301,7 @@ const TOOL_DEFINITIONS: Record<string, {
     type: "function",
     function: {
       name: "read_file",
-      description: "Read file(s). Supports globs.",
+      description: "Read file or glob",
       parameters: {
         type: "object",
         properties: {
@@ -305,7 +315,7 @@ const TOOL_DEFINITIONS: Record<string, {
     type: "function",
     function: {
       name: "write_file",
-      description: "Write to a file. Creates dirs.",
+      description: "Write file (auto-mkdir)",
       parameters: {
         type: "object",
         properties: {
@@ -320,11 +330,11 @@ const TOOL_DEFINITIONS: Record<string, {
     type: "function",
     function: {
       name: "web_fetch",
-      description: "Fetch URL content. Max 10K chars.",
+      description: "Fetch URL (max 10K chars)",
       parameters: {
         type: "object",
         properties: {
-          url: { type: "string", description: "URL to fetch (http/https)" },
+          url: { type: "string", description: "URL to fetch" },
         },
         required: ["url"],
       },
@@ -334,12 +344,12 @@ const TOOL_DEFINITIONS: Record<string, {
     type: "function",
     function: {
       name: "list_directory",
-      description: "List dir contents with depth control",
+      description: "List directory tree",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Dir path (default: '.')" },
-          depth: { type: "number", description: "Recursion depth (default: 0)" },
+          path: { type: "string", description: "Dir path" },
+          depth: { type: "number", description: "Recursion depth" },
         },
         required: [],
       },
@@ -349,13 +359,13 @@ const TOOL_DEFINITIONS: Record<string, {
     type: "function",
     function: {
       name: "grep_search",
-      description: "Search files by regex. Returns matches with line numbers.",
+      description: "Grep files by regex",
       parameters: {
         type: "object",
         properties: {
           pattern: { type: "string", description: "Regex pattern" },
-          glob: { type: "string", description: "File glob filter (default: '**/*')" },
-          maxResults: { type: "number", description: "Max matches (default: 50)" },
+          glob: { type: "string", description: "File glob filter" },
+          maxResults: { type: "number", description: "Max matches" },
         },
         required: ["pattern"],
       },
@@ -516,7 +526,10 @@ async function runAgentLoop(
   prompt: string,
   signal: AbortSignal,
 ): Promise<void> {
-  const messages: ChatMessage[] = [{ role: "user", content: prompt }];
+  const messages: ChatMessage[] = [
+    { role: "system", content: "You are a helpful CLI assistant. Use the provided tools to complete the task. Respond concisely." },
+    { role: "user", content: prompt },
+  ];
 
   for (let step = 0; step < CONFIG.AGENT_MAX_STEPS; step++) {
     const { text, toolCalls } = await streamChatCompletion(
@@ -562,7 +575,7 @@ if (import.meta.main) {
   let modelKey = "pro";
   let agentMode = false;
   const promptParts: string[] = [];
-  const KNOWN_FLAGS = new Set(["--model", "--max-steps", "--agent", "-a", "-v", "--version", "-h", "--help"]);
+  const KNOWN_FLAGS = new Set(["--model", "--max-steps", "--timeout", "--agent", "-a", "-v", "--version", "-h", "--help"]);
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--model") {
@@ -579,10 +592,19 @@ if (import.meta.main) {
         die("Error: --max-steps must be a positive integer");
       }
       (CONFIG as { AGENT_MAX_STEPS: number }).AGENT_MAX_STEPS = n;
+    } else if (args[i] === "--timeout") {
+      if (!args[i + 1] || args[i + 1].startsWith("-")) {
+        die("Error: --timeout requires a numeric value (e.g. --timeout 120000)");
+      }
+      const t = Number(args[++i]);
+      if (!Number.isInteger(t) || t < 1) {
+        die("Error: --timeout must be a positive integer");
+      }
+      (CONFIG as { API_TIMEOUT_MS: number }).API_TIMEOUT_MS = t;
     } else if (args[i] === "--agent" || args[i] === "-a") {
       agentMode = true;
     } else if (args[i] === "-v" || args[i] === "--version") {
-      console.log(`deepseek-cli v${VERSION}`);
+      console.log(`deepseek-cli v${getVersion()}`);
       process.exit(0);
     } else if (args[i] === "-h" || args[i] === "--help") {
       printUsage();
