@@ -1,0 +1,11 @@
+{
+  "name": "demo-bun-image",
+  "description": "Demo and smoke-test for Bun's built-in Bun.Image API (v1.3.14+)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "build": "mkdir -p ../../dist && bun build src/index.ts --outdir ../../dist --target bun --minify --sourcemap=external && bun -e \"const{renameSync}=require('fs');const d='../../dist';renameSync(d+'/index.js',d+'/demo-bun-image.js');renameSync(d+'/index.js.map',d+'/demo-bun-image.js.map')\"",
+    "test": "bun test"
+  }
+}

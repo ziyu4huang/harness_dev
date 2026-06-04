@@ -30,6 +30,11 @@ source scripts/claude-code-origin.sh         # clean Anthropic env
 # Project analysis workflow (Claude Code agent invocations)
 # Workflow({ name: 'analyze-codebase' })
 
+# DeepSeek CLI self-improvement workflow
+# Workflow({ name: 'deepseek-cli-self-improve' })
+# Workflow({ name: 'deepseek-cli-self-improve', args: { iterations: 3 } })
+# Metrics history persisted at: dist/deepseek-cli-metrics-history.json
+
 # Start SurrealDB
 ./scripts/run_surreal.sh
 ```
