@@ -3,6 +3,7 @@ export const meta = {
   description: 'Iterative self-improving workflow for demo-bun-image bun app. Builds minified bundle with sourcemaps, runs quality gates, benchmarks Bun.Image API coverage, self-reflects, applies improvements, and regression-tests each iteration.',
   whenToUse: 'Run to iteratively improve demo-bun-image. Each iteration audits → quality-gates → builds → benchmarks → reflects → improves. Quality measured on bundled dist/demo-bun-image.js.',
   phases: [
+    { title: 'Resolve', detail: 'Detect absolute project root path to eliminate PWD-dependent relative paths' },
     { title: 'History', detail: 'Load metrics history from previous runs, display trend summary' },
     { title: 'Audit', detail: 'Inventory current state: source files, tests, bundle size, API coverage, known issues' },
     { title: 'Quality-Gate', detail: 'Evaluate quality metrics: bundle size, test coverage, API coverage, code health, output correctness' },
@@ -40,20 +41,18 @@ export const meta = {
  * The workflow uses the bundled artifact (dist/demo-bun-image.js) for ALL quality
  * measurements. Bundle is built with external sourcemaps for debugging;
  * sourcemaps can be deleted and the bundle still runs standalone.
+ *
+ * Path resolution (v2 pattern from deepseek-cli workflow):
+ *   - Phase -1 detects project root via `git rev-parse --show-toplevel`
+ *   - ALL derived paths are absolute — eliminates CWD drift bugs
+ *   - Agents may cd during execution; absolute paths stay correct
  */
 
-// ─── Configuration ──────────────────────────────────────────────────────────
+// ─── Configuration: static constants only ───────────────────────────────────
 
-const APP_DIR = 'bun_apps/demo-bun-image'
-const DIST_DIR = 'dist'
 const BUNDLE_NAME = 'demo-bun-image.js'
 const BUNDLE_MAP_NAME = 'demo-bun-image.js.map'
-const BUNDLE_PATH = `${DIST_DIR}/${BUNDLE_NAME}`
-const BUNDLE_MAP_PATH = `${DIST_DIR}/${BUNDLE_MAP_NAME}`
-const SRC_ENTRY = `${APP_DIR}/src/index.ts`
-const TEST_FILE = `${APP_DIR}/src/index.test.ts`
-const HISTORY_FILE = `${DIST_DIR}/demo-bun-image-metrics-history.json`
-const OUTPUT_DIR = 'output'
+const WORKFLOW_REL = '.claude/workflows/demo-bun-image-self-improve.js'
 
 const DEFAULTS = {
   iterations: 1,
@@ -64,7 +63,96 @@ const DEFAULTS = {
   skipReflect: false,
 }
 
+// ─── Known regressions to guard against ──────────────────────────────────────
+
+const REGRESSION_GUARDS = [
+  {
+    id: 'output-path-cwd-relative',
+    description: 'Output dir MUST be <CWD>/output, never bun_apps/demo-bun-image/output or bun_apps/demo-bun-image/dist',
+    check: 'Run bundle with --metrics and verify outputDirIsCwdRelative=true and outputDir does NOT contain "bun_apps"',
+    severity: 'critical',
+  },
+  {
+    id: 'test-output-repo-root',
+    description: 'Test output must go to repo-root ./output/, not inside bun_apps/',
+    check: 'Grep test file for OUTPUT constant — must be "../../../output" (3 levels up from src/)',
+    severity: 'critical',
+  },
+  {
+    id: 'bundle-standalone-no-sourcemap',
+    description: 'Bundle must run standalone when .map file is deleted/renamed',
+    check: 'Temporarily rename .map to .bak, run bundle, verify exit 0, restore .map',
+    severity: 'critical',
+  },
+  {
+    id: 'no-per-app-node-modules',
+    description: 'No bun_apps/demo-bun-image/node_modules should exist (workspace hoist)',
+    check: 'Test-Path bun_apps/demo-bun-image/node_modules must be false',
+    severity: 'moderate',
+  },
+  {
+    id: 'no-output2-dir',
+    description: 'No stray output2/ directory in repo root',
+    check: 'Test-Path output2 must be false',
+    severity: 'minor',
+  },
+]
+
 const config = { ...DEFAULTS, ...(args || {}) }
+
+// ─── Phase -1: Resolve absolute paths ───────────────────────────────────────
+//
+// The workflow JS runs in a sandbox (no import.meta.dir / __dirname).
+// We resolve the project root ONCE via a cheap haiku agent, then derive
+// ALL paths as absolute. This eliminates the entire class of PWD-dependent
+// bugs (bun outfile resolving to wrong dir, agents with drifted CWD, etc).
+
+phase('Resolve')
+
+const PATH_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectRoot: { type: 'string', description: 'Absolute path to the git project root' },
+  },
+  required: ['projectRoot'],
+}
+
+const pathResolution = await agent(
+  `Detect the absolute path of the git project root for demo-bun-image.
+
+  Run: Bash("git rev-parse --show-toplevel")
+
+  This returns the absolute path to the repository root.
+  Return it as { projectRoot: "<the-path>" }.
+
+  IMPORTANT: Return ONLY the JSON object. Normalize backslashes to forward slashes.`,
+  { label: 'resolve-paths', phase: 'Resolve', model: 'haiku', schema: PATH_SCHEMA },
+)
+
+// Normalize to forward slashes for consistent string interpolation in agent prompts
+const PROJECT_ROOT = (pathResolution?.projectRoot || '').replace(/\\/g, '/')
+if (!PROJECT_ROOT) {
+  log('ERROR: Could not resolve project root. Falling back to relative paths — this may cause path issues.')
+}
+
+// ─── Derived paths (all absolute) ──────────────────────────────────────────
+
+const APP_DIR = PROJECT_ROOT ? `${PROJECT_ROOT}/bun_apps/demo-bun-image` : 'bun_apps/demo-bun-image'
+const DIST_DIR = PROJECT_ROOT ? `${PROJECT_ROOT}/dist` : 'dist'
+const BUNDLE_PATH = `${DIST_DIR}/${BUNDLE_NAME}`
+const BUNDLE_MAP_PATH = `${DIST_DIR}/${BUNDLE_MAP_NAME}`
+const SRC_ENTRY = `${APP_DIR}/src/index.ts`
+const TEST_FILE = `${APP_DIR}/src/index.test.ts`
+const HISTORY_FILE = `${DIST_DIR}/demo-bun-image-metrics-history.json`
+const OUTPUT_DIR = PROJECT_ROOT ? `${PROJECT_ROOT}/output` : 'output'
+const WORKFLOW_FILE = PROJECT_ROOT ? `${PROJECT_ROOT}/${WORKFLOW_REL}` : WORKFLOW_REL
+
+log(`Resolved paths:`)
+log(`  PROJECT_ROOT: ${PROJECT_ROOT || '(fallback: relative)'}`)
+log(`  APP_DIR:      ${APP_DIR}`)
+log(`  DIST_DIR:     ${DIST_DIR}`)
+log(`  BUNDLE_PATH:  ${BUNDLE_PATH}`)
+log(`  OUTPUT_DIR:   ${OUTPUT_DIR}`)
 
 // ─── Bun.Image API surface (for coverage tracking) ──────────────────────────
 
@@ -509,7 +597,22 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     For each API method, check if it's exercised in either the demo or test code.
     Build apiMethodsCovered and apiMethodsMissing arrays.
 
-    Step 6 — Produce audit result with all required fields.`,
+    Step 6 — REGRESSION GUARD CHECKS (run ALL of these):
+    For each guard, run the check command and report pass/fail:
+
+    ${REGRESSION_GUARDS.map((g, i) => `${i + 1}. [${g.severity}] ${g.id}: ${g.check}`).join('\n    ')}
+
+    Specific commands to run:
+    - Bash("bun '${BUNDLE_PATH}' --demo metadata --metrics 2>&1") — check output contains outputDirIsCwdRelative: true and outputDir does NOT contain "bun_apps"
+    - Bash("Select-String -Path '${TEST_FILE}' -Pattern 'OUTPUT' | Select-Object -First 3") — verify test OUTPUT path is "../../../output" (3 levels up)
+    - Bash("if (Test-Path '${BUNDLE_MAP_PATH}') { Move-Item '${BUNDLE_MAP_PATH}' '${BUNDLE_MAP_PATH}.bak' -Force; bun '${BUNDLE_PATH}' --demo metadata 2>&1; $LASTEXITCODE } else { 'no map file' }") — verify bundle runs without .map
+    - Bash("if (Test-Path '${BUNDLE_MAP_PATH}.bak') { Move-Item '${BUNDLE_MAP_PATH}.bak' '${BUNDLE_MAP_PATH}' -Force }") — restore .map
+    - Bash("Test-Path '${APP_DIR}/node_modules'") — must be false
+    - Bash("Test-Path 'output2'") — must be false
+
+    Add any failing guards to knownIssues.
+
+    Step 7 — Produce audit result with all required fields.`,
     { label: `audit-${iteration}`, phase: 'Audit', model: 'haiku', schema: AUDIT_SCHEMA },
   )
 
@@ -537,6 +640,15 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     - Sourcemap: must exist alongside bundle, but bundle must run standalone without it
     - Zero external dependencies (demo should use only Bun built-ins)
 
+    ## Regression Guards (from audit)
+    Any failing regression guards MUST be added as blockers:
+    ${JSON.stringify(REGRESSION_GUARDS, null, 2)}
+
+    If knownIssues from the audit contains any regression guard failures, those are
+    CRITICAL blockers that prevent proceeding. In particular:
+    - output-path-cwd-relative: output dir MUST be <CWD>/output, NEVER bun_apps/*/output
+    - test-output-repo-root: test OUTPUT must be "../../../output" (3 levels from src/)
+
     ## Evaluation Dimensions
 
     1. **bundle-size**: Score based on existingBundleSizeKB vs target.
@@ -558,6 +670,9 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
     6. **build-quality**: Does the build produce a clean minified bundle with
        a valid external sourcemap? Can the bundle run without the sourcemap?
+
+    7. **regression-guards**: Do all regression guards pass? Score 100 if all pass,
+       0 if any critical guard fails, 50 if only minor/moderate guards fail.
 
     Produce verdict, blockers, and improvement areas.`,
     { label: `quality-gate-${iteration}`, phase: 'Quality-Gate', model: 'haiku', schema: QUALITY_GATE_SCHEMA },
@@ -610,14 +725,17 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       ## Step 5: Time the build
       Bash("Measure-Command { cd ${APP_DIR} && bun run build 2>&1 | Out-Null } | Select-Object -ExpandProperty TotalMilliseconds")
 
-      ## Step 6: Verify bundle runs standalone
-      Bash("bun '${BUNDLE_PATH}' --demo metadata --output ./output 2>&1")
-      Check it exits successfully with exit code 0.
+      ## Step 6: Verify bundle runs with --metrics (check output path)
+      Bash("bun '${BUNDLE_PATH}' --demo metadata --metrics 2>&1")
+      CRITICAL: Verify the output JSON contains:
+      - outputDirIsCwdRelative: true
+      - outputDir does NOT contain "bun_apps" in the path
+      If either fails, set bundleRunsStandalone=false and add a warning.
 
       ## Step 7: Verify bundle runs WITHOUT sourcemap
       Temporarily rename the sourcemap:
       Bash("if (Test-Path '${BUNDLE_MAP_PATH}') { Move-Item '${BUNDLE_MAP_PATH}' '${BUNDLE_MAP_PATH}.bak' -Force }")
-      Bash("bun '${BUNDLE_PATH}' --demo metadata --output ./output 2>&1")
+      Bash("bun '${BUNDLE_PATH}' --demo metadata --output '${OUTPUT_DIR}' 2>&1")
       Restore it:
       Bash("if (Test-Path '${BUNDLE_MAP_PATH}.bak') { Move-Item '${BUNDLE_MAP_PATH}.bak' '${BUNDLE_MAP_PATH}' -Force }")
 
@@ -664,25 +782,29 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
     ### Category 2: Bundle integrity
     2. **bundle-load-time**: Time loading the bundle
-       Bash("Measure-Command { bun '${BUNDLE_PATH}' --demo metadata --output ./output 2>&1 | Out-Null } | Select-Object -ExpandProperty TotalMilliseconds")
+       Bash("Measure-Command { bun '${BUNDLE_PATH}' --demo metadata --output '${OUTPUT_DIR}' 2>&1 | Out-Null } | Select-Object -ExpandProperty TotalMilliseconds")
     3. **source-map-exists**: Bash("Test-Path '${BUNDLE_MAP_PATH}'")
     4. **bundle-minified-size**: Bash("(Get-Item '${BUNDLE_PATH}').Length")
 
     ### Category 3: Demo execution (each demo against the bundle)
-    5. **demo-metadata**: Bash("bun '${BUNDLE_PATH}' --demo metadata --output ./output 2>&1")
-    6. **demo-resize**: Bash("bun '${BUNDLE_PATH}' --demo resize --output ./output 2>&1")
-    7. **demo-convert**: Bash("bun '${BUNDLE_PATH}' --demo convert --output ./output 2>&1")
-    8. **demo-modulate**: Bash("bun '${BUNDLE_PATH}' --demo modulate --output ./output 2>&1")
-    9. **demo-flip**: Bash("bun '${BUNDLE_PATH}' --demo flip --output ./output 2>&1")
-    10. **demo-encode**: Bash("bun '${BUNDLE_PATH}' --demo encode --output ./output 2>&1")
-    11. **demo-placeholder**: Bash("bun '${BUNDLE_PATH}' --demo placeholder --output ./output 2>&1")
-    12. **demo-base64**: Bash("bun '${BUNDLE_PATH}' --demo base64 --output ./output 2>&1")
+    5. **demo-metadata**: Bash("bun '${BUNDLE_PATH}' --demo metadata --output '${OUTPUT_DIR}' 2>&1")
+    6. **demo-resize**: Bash("bun '${BUNDLE_PATH}' --demo resize --output '${OUTPUT_DIR}' 2>&1")
+    7. **demo-convert**: Bash("bun '${BUNDLE_PATH}' --demo convert --output '${OUTPUT_DIR}' 2>&1")
+    8. **demo-modulate**: Bash("bun '${BUNDLE_PATH}' --demo modulate --output '${OUTPUT_DIR}' 2>&1")
+    9. **demo-flip**: Bash("bun '${BUNDLE_PATH}' --demo flip --output '${OUTPUT_DIR}' 2>&1")
+    10. **demo-encode**: Bash("bun '${BUNDLE_PATH}' --demo encode --output '${OUTPUT_DIR}' 2>&1")
+    11. **demo-placeholder**: Bash("bun '${BUNDLE_PATH}' --demo placeholder --output '${OUTPUT_DIR}' 2>&1")
+    12. **demo-base64**: Bash("bun '${BUNDLE_PATH}' --demo base64 --output '${OUTPUT_DIR}' 2>&1")
     13. **demo-all**: Run all demos and verify no errors
-        Bash("bun '${BUNDLE_PATH}' --output ./output 2>&1")
+        Bash("bun '${BUNDLE_PATH}' --output '${OUTPUT_DIR}' --metrics 2>&1")
+        CRITICAL: Verify the --metrics JSON output shows:
+        - outputDirIsCwdRelative: true
+        - outputDir does NOT contain "bun_apps"
+        If this fails, mark as a CRITICAL failure.
 
     ### Category 4: Output file validation
     14. **output-files-valid**: After running --demo all, list the output directory
-        Bash("Get-ChildItem ./output | ForEach-Object { '{0} {1} bytes' -f $_.Name, $_.Length }")
+        Bash("Get-ChildItem '${OUTPUT_DIR}' | ForEach-Object { '{0} {1} bytes' -f $_.Name, $_.Length }")
         For each generated file, verify it exists and has non-zero size.
 
     ### Category 5: Image format verification
@@ -835,6 +957,9 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       ## Improvements Applied
       ${JSON.stringify(improvements?.changesApplied || [], null, 2)}
 
+      ## Known Regression Guards to Re-check
+      ${JSON.stringify(REGRESSION_GUARDS, null, 2)}
+
       ## Step 1: Re-build the bundle
       Bash("cd ${APP_DIR} && bun run build 2>&1")
 
@@ -847,15 +972,28 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       ## Step 4: Run the test suite
       Bash("cd ${APP_DIR} && bun test 2>&1")
 
-      ## Step 5: Verify bundle still runs
-      Bash("bun '${BUNDLE_PATH}' --demo metadata --output ./output 2>&1")
+      ## Step 5: Verify bundle still runs with --metrics
+      Bash("bun '${BUNDLE_PATH}' --demo metadata --metrics 2>&1")
+      CRITICAL: Verify outputDirIsCwdRelative: true and outputDir does NOT contain "bun_apps".
+      If this fails, add a CRITICAL regression.
 
       ## Step 6: Test bundle runs WITHOUT sourcemap
       Bash("if (Test-Path '${BUNDLE_MAP_PATH}') { Move-Item '${BUNDLE_MAP_PATH}' '${BUNDLE_MAP_PATH}.bak' -Force }")
-      Bash("bun '${BUNDLE_PATH}' --demo resize --output ./output 2>&1")
+      Bash("bun '${BUNDLE_PATH}' --demo resize --output '${OUTPUT_DIR}' 2>&1")
       Bash("if (Test-Path '${BUNDLE_MAP_PATH}.bak') { Move-Item '${BUNDLE_MAP_PATH}.bak' '${BUNDLE_MAP_PATH}' -Force }")
 
-      ## Step 7: Compare metrics and produce regression results.
+      ## Step 7: Run ALL regression guard checks
+      - Bash("Select-String -Path '${TEST_FILE}' -Pattern 'OUTPUT' | Select-Object -First 3")
+        Verify OUTPUT is "../../../output" (NOT "../../../dist" or anything inside bun_apps)
+      - Bash("Test-Path '${APP_DIR}/node_modules'")
+        Must be false (workspace hoist)
+      - Bash("Test-Path 'output2'")
+        Must be false (no stray dirs)
+      - Bash("bun '${BUNDLE_PATH}' --demo all --metrics 2>&1")
+        Verify full run succeeds and outputDir is correct
+
+      ## Step 8: Compare metrics and produce regression results.
+      Any failing regression guard → add to regressions array with appropriate severity.
       Produce regression results with deltas and verdict.`,
       { label: `regression-${iteration}`, phase: 'Regression', model: 'sonnet', schema: REGRESSION_RESULT_SCHEMA },
     )
