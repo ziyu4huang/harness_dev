@@ -1,0 +1,13 @@
+{
+  "name": "hello-bun",
+  "description": "Minimal Bun CLI workspace — hello world example",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "hello-bun": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "test": "bun test"
+  }
+}

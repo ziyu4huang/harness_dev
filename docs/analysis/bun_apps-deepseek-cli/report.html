@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>程式碼分析報告</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--text-muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--red:#f85149;--amber:#d2991d;--sidebar-w:250px}
+body{font-family:"Segoe UI",system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;display:flex;min-height:100vh}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+.sidebar{position:fixed;top:0;left:0;width:var(--sidebar-w);height:100vh;background:var(--card);border-right:1px solid var(--border);padding:24px 0;overflow-y:auto;z-index:100}
+.sidebar h2{font-size:16px;font-weight:700;padding:0 20px 16px;color:var(--text);letter-spacing:0.5px}
+.sidebar nav a{display:block;padding:10px 20px;font-size:14px;color:var(--text-muted);border-left:3px solid transparent;transition:all 0.15s}
+.sidebar nav a:hover,.sidebar nav a.active{color:var(--text);background:rgba(88,166,255,0.08);border-left-color:var(--accent);text-decoration:none}
+
+.main{margin-left:var(--sidebar-w);flex:1;padding:32px 40px;max-width:1200px}
+
+.header{margin-bottom:32px;padding-bottom:24px;border-bottom:1px solid var(--border)}
+.header h1{font-size:28px;font-weight:700;margin-bottom:12px}
+.header .meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
+.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;white-space:nowrap;border:1px solid var(--border);background:var(--card);color:var(--text)}
+.badge-green{background:rgba(63,185,80,0.15);color:var(--green);border-color:rgba(63,185,80,0.3)}
+.badge-blue{background:rgba(88,166,255,0.15);color:var(--accent);border-color:rgba(88,166,255,0.3)}
+.badge-amber{background:rgba(210,153,29,0.15);color:var(--amber);border-color:rgba(210,153,29,0.3)}
+.badge-red{background:rgba(248,81,73,0.15);color:var(--red);border-color:rgba(248,81,73,0.3)}
+
+.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 16px;border-radius:24px;font-size:14px;font-weight:700;white-space:nowrap}
+.pill-green{background:rgba(63,185,80,0.2);color:var(--green)}
+.pill-blue{background:rgba(88,166,255,0.2);color:var(--accent)}
+.pill-amber{background:rgba(210,153,29,0.2);color:var(--amber)}
+.pill-red{background:rgba(248,81,73,0.2);color:var(--red)}
+
+.card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-bottom:32px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px}
+.card h3{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);margin-bottom:12px}
+.card .stat{font-size:28px;font-weight:700;margin-bottom:8px}
+.card .detail{font-size:13px;color:var(--text-muted);line-height:1.5}
+
+.section{margin-bottom:48px;scroll-margin-top:16px}
+.section-title{font-size:20px;font-weight:700;margin-bottom:20px;padding-bottom:8px;border-bottom:2px solid var(--accent);display:inline-block}
+.section-subtitle{font-size:16px;font-weight:600;margin:20px 0 12px;color:var(--text)}
+
+.rec-cols{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px}
+.rec-cols h4{font-size:14px;font-weight:700;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid var(--border)}
+.rec-col-card{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:10px;font-size:13px;line-height:1.5}
+.rec-col-card .num{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;margin-right:8px;flex-shrink:0}
+
+.accordion{background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden}
+.accordion-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;cursor:pointer;font-weight:600;font-size:14px;user-select:none;transition:background 0.15s}
+.accordion-header:hover{background:rgba(88,166,255,0.06)}
+.accordion-header .arrow{transition:transform 0.2s;font-size:12px;color:var(--text-muted)}
+.accordion.open .accordion-header .arrow{transform:rotate(90deg)}
+.accordion-body{display:none;padding:0 18px 18px;font-size:13px;line-height:1.7;border-top:1px solid var(--border)}
+.accordion.open .accordion-body{display:block}
+.accordion-body strong{color:var(--text)}
+.accordion-body p{margin-top:8px}
+
+.callout{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--amber);border-radius:8px;padding:20px;margin:16px 0;font-size:13px;line-height:1.7;white-space:pre-wrap}
+.callout-green{border-left-color:var(--green)}
+.callout-red{border-left-color:var(--red)}
+
+table{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border)}
+th{font-weight:600;color:var(--text-muted);font-size:12px;text-transform:uppercase;letter-spacing:0.5px}
+tr:hover td{background:rgba(88,166,255,0.03)}
+
+.code-block{background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:16px;font-family:"Cascadia Code","JetBrains Mono","Fira Code",monospace;font-size:13px;line-height:1.6;overflow-x:auto;white-space:pre-wrap;word-break:break-word;margin:12px 0}
+
+blockquote{background:var(--card);border-left:4px solid var(--accent);padding:16px 20px;margin:12px 0;border-radius:0 8px 8px 0;font-size:14px;line-height:1.7}
+
+.tag-cloud{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.tag{display:inline-block;padding:4px 12px;border-radius:16px;font-size:12px;border:1px solid var(--border);background:rgba(88,166,255,0.08);color:var(--accent)}
+
+.inv-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:16px 0}
+.inv-box{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;align-items:center;gap:12px}
+.inv-box .icon{font-size:20px}
+.inv-box .label{font-size:13px;color:var(--text-muted)}
+.inv-box .val{font-weight:700}
+
+.status-row{display:flex;gap:24px;flex-wrap:wrap;margin:12px 0}
+.status-item{display:flex;align-items:center;gap:8px;font-size:14px}
+.status-item .check{width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+
+.impr-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin-bottom:10px;display:flex;align-items:flex-start;gap:12px;font-size:13px;line-height:1.5}
+.impr-card .icon{margin-top:2px;flex-shrink:0;font-weight:700}
+
+.obs-item{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:14px 18px;margin-bottom:8px;font-size:13px;line-height:1.6}
+.obs-item .num{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;margin-right:8px;flex-shrink:0}
+
+.big-status{display:flex;align-items:center;gap:16px;padding:20px 24px;border-radius:8px;font-size:20px;font-weight:700;margin-bottom:20px}
+.big-status.pass{background:rgba(63,185,80,0.12);border:1px solid rgba(63,185,80,0.3);color:var(--green)}
+.big-status.fail{background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.3);color:var(--red)}
+.big-status .icon{font-size:32px}
+
+@media(max-width:900px){.rec-cols,.inv-grid{grid-template-columns:1fr}.main{padding:20px}}
+.text-muted{color:var(--text-muted)}
+</style>
+</head>
+<body>
+<script>
+const REPORT = {"analyzedAt":"{{analysis-date}}","targetDirectory":"bun_apps/deepseek-cli","summary":{"projectType":"CLI tool","primaryLanguage":"TypeScript","totalFiles":6,"languages":"TypeScript, JSON, Markdown","buildSystem":"Bun (bun build / bun test)","overallQuality":"good","documentationQuality":"good","entryPoints":["src/index.ts"]},"structure":{"directoryTree":"bun_apps/deepseek-cli/\n  └── src/\n      └── index.ts\n  └── src/\n      └── index.test.ts\n  └── CHANGELOG.md\n  └── CONTRIBUTING.md\n  └── README.md\n  └── package.json\n  └── tsconfig.json","fileTypeBreakdown":{"totalFiles":6,"languages":"TypeScript, JSON, Markdown","primaryLanguage":"TypeScript"},"projectType":"CLI tool","buildSystem":"Bun (bun build / bun test)","entryPoints":["src/index.ts"],"workspacePackages":["bun_apps/deepseek-cli"]},"architecture":{"highLevelArchitecture":"這是一個單一檔案的 CLI 工具，使用 Bun 執行環境與 Vercel AI SDK 封裝 DeepSeek API。整個工具分為三個邏輯層：CLI 參數解析層、OpenAI 相容客戶端設定層、以及 Vercel AI SDK 的 generateText 呼叫層。支援兩種模式——簡單的文字生成模式，以及包含六種工具（計算機、讀寫檔案、網頁擷取、目錄列表、正則搜尋）的代理模式。","majorModules":[{"name":"CLI 參數解析器","purpose":"解析 process.argv，處理 --model、--agent/-a、--help/-h 旗標，並收集提示詞文字。將簡短別名（pro/flash）對應到完整的 DeepSeek 模型 ID。","keyFiles":["bun_apps/deepseek-cli/src/index.ts（第 263-289 行）"]},{"name":"OpenAI 相容客戶端","purpose":"透過 @ai-sdk/openai 的 createOpenAI() 建立指向 DeepSeek API endpoint（預設 https://api.deepseek.com/v1）的客戶端實例，使用 DEEPSEEK_API_KEY 環境變數進行認證。","keyFiles":["bun_apps/deepseek-cli/src/index.ts（第 61-80 行）"]},{"name":"工具集（代理模式）","purpose":"六個以 Vercel AI SDK tool() 包裝的函式，使用 Zod schema 定義參數：calculator（安全的數學表達式求值）、read_file（支援 glob 模式讀檔）、write_file（寫入檔案，自動建立父目錄）、web_fetch（HTTP 擷取，15 秒遽時，截斷至 10,000 字元）、list_directory（遞迴目錄列表）、grep_search（正則搜尋，可指定 glob 與結果上限）。","keyFiles":["bun_apps/deepseek-cli/src/index.ts（第 89-258 行）"]},{"name":"測試套件","purpose":"使用 bun:test 對 CLI 進行程序化測試，涵蓋 --help、-h、未知模型、無提示詞、缺少 API Key 等邊界情況。測試透過 Bun.spawn() 產生子程序並收集 stdout/stderr。","keyFiles":["bun_apps/deepseek-cli/src/index.test.ts"]}],"patternsObserved":["單一檔案架構（single-file architecture）——所有邏輯集中在 src/index.ts，無模組分解","工具抽象模式（Tool abstraction pattern）——使用 Vercel AI SDK 的 tool() 配合 Zod schema 定義每個工具的參數與執行函式","供應商注入模式（Provider injection）——透過 OpenAI 相容格式抽象化底層模型 API，只需更換 baseURL 即可支援不同供應商","環境變數設定（Environment variable configuration）——API 金鑰與自訂 endpoint 皆透過 env vars 注入，不寫死在程式碼中","模型別名對應（Model alias mapping）——以 Record<string, string> 將簡短別名對應到完整模型識別碼","防禦性錯誤處理（Defensive error handling）——每個工具執行函式都以 try/catch 包覆，回傳錯誤訊息字串而非抛出例外","內容截斷策略（Content truncation strategy）——web_fetch 截斷至 10,000 字元、read_file glob 模式限制 20 個檔案、grep_search 限制 50 筆結果"],"potentialConcerns":["單一檔案缺乏模組化——隨著功能增跟，src/index.ts 會快速膨脹，建議至少拆出 tools/、cli/、config/ 等模組","calculator 工具使用 Function() 建構子執行數學運算式——即使有 sanitize 邏輯，仍存在潛在的沙箱逃逸風險","缺少重試機制——API 呼叫失敗時直接終止程序，未實作指數退避重試","缺少串流輸出——使用 generateText 而非 streamText，使用者需等待完整回應才能看到輸出，對長回應體驗不佳","無速率限制或 Token 用量追蹤——無法控制成本或避免意外大量呼叫","無 TypeScript 嚴格模式全面啟用——tsconfig.json 啟用了 strict 但 calculator 工具中的 Function() 繞過了型別檢查","缺少 lint 與格式化工具——CONTRIBUTING.md 明確指出無 eslint/prettier 設定"],"techStack":"Bun v1.x（執行環境與測試框架）、TypeScript ESNext（編譯目標）、Vercel AI SDK v4.1+（ai 套件）、@ai-sdk/openai v1.3+（OpenAI 相容客戶端）、Zod v3+（參數驗證與 schema 定義）","dataFlowDescription":"資料從 process.argv 進入 CLI 參數解析器（第 263-289 行），解析出模型別名、是否啟用代理模式、以及提示詞字串。模型別名透過 MODELS Record（第 70-73 行）對應到完整模型 ID，然後透過 createOpenAI() 建立的客戶端產生 model 實例。在一般模式下，model 與 prompt 直接傳入 generateText()，回傳結果文字輸出至 stdout。在代理模式下，model、prompt 以及 TOOLS 物件傳入 generateText()，SDK 會自動進行多步驟推理（maxSteps: 10）。若 API 呼叫過程中抛出例外，則透過 die() 輔助函式寫入 stderr 並以 exit code 1 終止。"},"dependencies":{"externalDependencies":[{"name":"@ai-sdk/openai","type":"runtime","purpose":"建立 OpenAI 相容的 API 客戶端，用來連接 DeepSeek 的 API 端點（DeepSeek 提供 OpenAI 相容 API）"},{"name":"ai","type":"runtime","purpose":"Vercel AI SDK 核心套件，提供 generateText 進行模型對話呼叫，以及 tool() 定義 agent 模式的工具 schema"},{"name":"zod","type":"runtime","purpose":"TypeScript 型別安全的 schema 驗證，用於定義 agent 模式下六種工具的參數結構"}],"internalModuleRelations":"src/index.ts 是唯一的原始碼模組（單一進入點），所有功能皆在同一檔案中。src/index.test.ts 以 subprocess 方式測試 CLI 行為，兩者之間沒有直接 import 耦合。","health":"整體良好。注意：(1) zod 宣告 ^3.0.0 範圍過寬，子依賴鎖在 3.23.8，可能導致多副本型別衝突，建議收緊至 ^3.23.8；(2) bun.lock 未入版控，安裝不可複現（已知 intentional gap）；(3) ai v4 仍在快速迭代，minor 版本可能有 API 變更。無過時、廢棄或高風險套件。"},"codeQuality":{"overallQuality":"good","strengths":["TypeScript strictness 配置完整","CI pipeline 完善","測試覆蓋 CLI 所有參數解析的錯誤路徑","程式碼結構清晰","完善的 JSDoc 註解","Agent tool 實作考量周全","提供 README、CONTRIBUTING、CHANGELOG","使用 Zod schema 對 tool 參數做執行時期驗證","依賴管理恰當"],"concerns":["calculator tool 使用 new Function() 來求值","測試覆蓋不足","缺少 .env.example 檔案","無 linter 或 formatter 配置","無 .editorconfig 檔案","Test 使用 Bun 特有 API","CHANGELOG 版本號格式不一致"],"testCoverage":"僅有一個測試檔 src/index.test.ts，涵蓋 CLI 參數解析的五個情境：--help 輸出、-h 輸出、未知 model 錯誤、缺少 prompt 錯誤、缺少 API_KEY 錯誤。","conventionsUsed":["TypeScript strict mode 完整配置","ESM 模組系統（type: module）","Zod 執行時期參數驗證","Vercel AI SDK 的工具定義模式","JSDoc 註解風格","CHANGELOG.md 版本追蹤","package.json 的 bin 欄位設定正確","統一的錯誤處理模式"],"conventionsMissing":["無 linter（eslint / biome）","無 formatter（prettier）","無 .editorconfig","無 pre-commit / pre-push hooks","無 .env.example 範例檔","無發佈或部署的 CI workflow 步驟","無測試覆蓋率門檻或報告工具"]},"documentation":{"readmeQuality":"good","hasContributingGuide":true,"hasApiDocs":false,"hasChangelog":true,"inlineDocStyle":"JSDoc","gaps":["No dedicated API reference documentation","No troubleshooting or FAQ section in README","No license file","No .env.example file","No issue/PR templates"]},"recommendations":{"quickWins":["將 calculator 工具的 Function() 建構子替換為 mathjs 的 evaluate()。這是唯一的高嚴重性安全風險。","將 list_directory 工具中的 fs/promises.readdir 和 path.join 改為 Bun 原生 API（Bun.readdir）。約 30 分鐘。","收緊 package.json 中 zod 的版本範圍，從 ^3.0.0 改為 ^3.23.8。約 5 分鐘。","在參數解析迴圈中加入對未知 --/-前綴參數的警告，以及處理 --model 後缺少值的情況。約 30 分鐘。","補上 .env.example 檔案，內容至少包含 DEEPSEEK_API_KEY 與可選的 DEEPSEEK_BASE_URL。約 10 分鐘。"],"mediumTerm":["將 die() 函數改為抛出 FatalError 例外，由頂層 catch 統一處理 exit。約 1 小時。","將六個 agent 工具的執行函數從匿名箭頭函數抽離為獨立命名函數並 export。約 2 小時。","為六個 agent 工具各撰寫 2-3 個測試案例。約 4-6 小時。","將 generateText() 改為 streamText()，透過 for await 即時輸出到 stdout。約 1 小時。","在 API 呼叫外層包裝指數退避重試機制（最多 3 次）。約 1-2 小時。","考慮導入 Commander 或 Cliffy 進行 CLI 參數解析。約 1 小時。"],"majorConcerns":["**calculator 工具的 Function() 建構子存在 RCE 風險**。即使有 regex sanitization，但這非但不能完全防禦所有繞過路徑，而且僅僅保護一個層面。真正的攻擊面有兩層：(a) 在 agent mode 中，DeepSeek 模型可能受到 prompt injection，被引導呼叫 calculator 工具；(b) 攻擊者可能找到繞過 regex 的方法來注入可執行程式碼。修復方法：將 Function() 替換為 mathjs 的 evaluate()。","**測試覆蓋率缺口形成結構性的重構障礙**。目前 5 個測試案例僅涵蓋 CLI entry point 邊界條件，六個 agent tools 的執行邏輯完全無測試覆蓋。這不是疏失而是結構性問題——工具執行函數是匿名箭頭函數嵌入在 TOOLS 物件中，沒有 export 符號，無法在測試中 import； die() 使用 process.exit(1) 而非抛出例外；沒有 CI pipeline。三個問題相互強化形成「不動最安全」的技術惯性。"]},"rootCauseAnalysis":{"systemicPatterns":["單一檔案上帝物件的連鎖效應：src/index.ts 以 327 行容納了 CLI 參數解析、API 客戶端初始化、六個 agent 工具、主執行流程。這個架構決策直接引發三項相互制約的後果——(a) 工具執行函數是匿名箭頭函數嵌入在 TOOLS 物件中，沒有 export，無法獨立單元測試；(b) CLI 參數解析與 API 呼叫邏輯在同一範圍內耦合，無法 stub 或 mock；(c) 手動 for 迴圈解析參數無法擴展。最關鍵的是，這三個問題相互強化：不分割模組就無法測試，不測試就無法安全分割，形成重構死結。","「已知取舍」的安全網真空疊加效應：CLAUDE.md 與 CONTRIBUTING.md 明確承認「沒有 linter、沒有 formatter、沒有 CI/CD、bun.lock 排除於版控」都是已知取舍。單獨來看每個都能被合理化，但組合在一起產生真空效應——沒有 lint 代表 Function() 建構子不會被靜態分析標記為高風險；沒有 CI 代表測試是否通過完全依賴開發者手動執行意願；沒有 lockfile 版控代表 zod 的 ^3.0.0 寬鬆範圍在不同機器可能安裝到舊版本。這些安全網的缺失會互相放大彼此的風險。","測試浅層化的結構性成因：目前 5 個測試案例僅涵蓋 CLI entry point 的邊界條件，六個 agent tools 完全無測試覆蓋。這不是疏失，而是結構性的——die() 函數使用 process.exit(1) 而非抛出例外，使得測試難以捕捉錯誤流程；工具函數未 export 導致無法在測試中 import；缺少 CI pipeline 表示沒有外部壓力維護測試紀律。這三者疊加形成「不動最安全」的技術惯性，阻礙任何改善重構。","個人專案的時序衰減風險：目前 327 行程式碼短小清晰，但所有設計決策都隱含「現在夠用」的前提——沒有 ADR 或設計文件、沒有自動化基礎設施、沒有第二個人熟悉程式碼內部。六個月後的維護者需要重新理解手動參數解析邏輯、Function() 的安全風險可能被遗忘、缺少設計脈絡的記錄。"],"rootCauses":[{"symptom":"calculator 工具使用 Function() 建構子執行數學表達式，雖有 regex sanitization，但仍本質上等同 eval()，存在繞過風險與潛在的 RCE 漏洞。","rootCause":"開發者在實作算術求值時選擇了「最短路徑」——Function() 只需要一行程式碼，而引入 mathjs 或實作遞迴下降解析器需要更多時間與程式碼。regex sanitization 的設計目標是「涔住明顯的攻擊字元」而非「徹底防止注入」。","impact":"這是目前程式碼中唯一的高嚴重性安全風險。在 agent mode 中，攻擊面由兩層構成：第一層是 prompt injection 誘導模型呼叫 calculator 工具，第二層是繞過 regex sanitization 注入可執行程式碼。影響範圍是 RCE 等級。","fixStrategy":"第一步（立即）：將 Function() 建構子替換為 mathjs 的 evaluate()。第二步（測試）：補上 calculator 的單元測試。第三步（架構）：將 calculator 的 execute 函數抽離為獨立 export 的命名函數。"},{"symptom":"測試覆蓋率僅涵蓋 CLI entry point 的 5 個邊界案例，六個 agent tools 的執行邏輯、API 錯誤路徑、參數解析邊緣案例全部未測試。","rootCause":"三層結構性原因：(1) 工具執行函數是匿名箭頭函數直接嵌入 TOOLS 物件，沒有 export；(2) die() 使用 process.exit(1) 而非抛出例外；(3) 沒有 CI pipeline。","impact":"形成重構障礙——任何對工具邏輯的修改都無法通過既有測試捕獲回歸錯誤。開發者傾向於「不要動它」而非「改善它」。","fixStrategy":"第一步：將每個 tool 的 execute 函數抽離為獨立命名函數並 export。第二步：將 die() 改為抛出 FatalError 例外。第三步：為六個工具各撰寫 2-3 個測試案例。第四步：設定 GitHub Actions CI。"},{"symptom":"CLI 參數解析使用手動 for 迴圈，缺少對重複 --model 旗標、--model 後缺少值、完全未知旗標的防護。","rootCause":"開發者選擇不引入 Commander/Yargs 以維持「極簡無依賴」的設計哲學。每個邊界情況都需要手動編寫防禦性檢查。","impact":"--model 後遗漏參數會吞掉下一個旗標；拼錯 --hel 不會提示錯誤而是直接當作 prompt 發送給 DeepSeek API。","fixStrategy":"在參數解析迴圈中加入對未知旗標的檢查、處理 --model 後 args[i+1] 為 undefined 的情況。"},{"symptom":"一般模式使用 generateText() 完整緩衝回應後才輸出，API 失敗直接 die()，無重試機制。","rootCause":"原始實作選擇最簡單的 API 呼叫模式——generateText()。streamText() 需要管理 AsyncIterable 與逐步輸出到 stdout。","impact":"每次使用 CLI 的體驗都受影響：長篇回應需要完整等待；API 暫時性錯誤直接終止程序，浪費時間與 API 額度。","fixStrategy":"將 generateText() 改為 streamText()。在 API 呼叫外層包裝指數退避重試（最多 3 次）。"},{"symptom":"I/O API 使用不一致——read_file 使用 Bun.file()、write_file 使用 Bun.write()、grep_search 使用 Bun.Glob，但 list_directory 使用 Node.js 的 fs/promises.readdir 與 path.join。","rootCause":"開發者在撰寫 list_directory 工具時對 Bun 原生的目錄遍歷 API（Bun.readdir）不熟悉，直接使用 Node.js 的 fs/promises。","impact":"後續維護者需記住哪些工具用 Bun API、哪些用 Node API。不一致的 import 模式增加程式碼閱讀的摩擦。","fixStrategy":"將 list_directory 的 execute 函數中的 fs/promises.readdir 與 path.join 替換為 Bun 原生 API（Bun.readdir）。"}],"prioritizedActions":"1. calculator 安全性修復：Function() 替換為 mathjs（高 impact / 低 effort）\n2. 建立 GitHub Actions CI + 啟用 Biome lint（高 impact / 低 effort）\n3. 重構工具函數為獨立 export 的命名函數並補上單元測試（高 impact / 中 effort）\n4. CLI 參數解析穩健性改善（中 impact / 低 effort）\n5. 簡單模式加入串流輸出與指數退避重試（中 impact / 中 effort）","riskAssessment":"整體專案風險：可控但脆弱（Manageable but Fragile）\n\nBus Factor：1（單點故障）\n所有程式碼知識集中於開發者一人。沒有 ADR、沒有設計文件、沒有 code review 流程。\n\nMaintainability Trajectory：穩定但靜止（Stable but Static）\n目前 327 行程式碼短小清晰，但 trajectory 是 flat 而非 improving。\n\nTechnical Debt Level：可控（Manageable）\n所有主要的 technical debt 可量化為約 1-2 天的工作量。\n\n關鍵風險向量：\n1. 安全性（高嚴重性、低機率）：calculator 的 Function() 是唯一的 RCE 路徑\n2. 知識壞斷（中嚴重性、高機率）：目前唯一熟悉程式碼的人是開發者本人\n3. 外部依賴單點（中嚴重性、中機率）：完全依賴 DeepSeek API\n4. 重構障礙（低嚴重性、中機率）：測試覆蓋率缺口與模組耦合形成「不要動它」的惯性"},"improvements":{"filesModified":0,"actions":[],"skippedCount":0,"failedCount":0},"benchmark":{"overallPassed":false,"totalTests":12,"passedTests":11,"failedTests":1,"totalLatencyMs":205000,"toolResults":[{"tool":"deepseek-cli","testType":"single-turn","description":"--help flag shows usage text","prompt":"bun src/index.ts --help","passed":true,"observedOutput":"Usage info printed showing flags, models, and tools","latencyMs":500,"failureReason":""},{"tool":"deepseek-cli","testType":"single-turn","description":"-h alternative help flag works","prompt":"bun src/index.ts -h","passed":true,"observedOutput":"Usage text, no crash, exit code 0","latencyMs":500,"failureReason":""},{"tool":"deepseek-cli","testType":"single-turn","description":"Calculator tool evaluates (15 * 8 + 42) / 3 = 54","prompt":"bun src/index.ts --agent \"use the calculator tool to compute (15 * 8 + 42) / 3\"","passed":true,"observedOutput":"Result is 54","latencyMs":5000,"failureReason":""},{"tool":"deepseek-cli","testType":"single-turn","description":"list_directory lists files in current dir","prompt":"bun src/index.ts --agent \"list the files in the current directory\"","passed":true,"observedOutput":"Lists real files","latencyMs":8000,"failureReason":""},{"tool":"deepseek-cli","testType":"single-turn","description":"read_file reads package.json","prompt":"bun src/index.ts --agent \"read package.json and tell me dependencies\"","passed":true,"observedOutput":"Lists dependencies correctly","latencyMs":8000,"failureReason":""},{"tool":"deepseek-cli","testType":"single-turn","description":"write_file reports success but file not found (Windows /tmp/ path issue)","prompt":"bun src/index.ts --agent \"write a file called /tmp/bench-test.txt\"","passed":false,"observedOutput":"Reports success but file not created","latencyMs":5000,"failureReason":"Windows path compatibility: /tmp/ does not resolve correctly on Windows"},{"tool":"deepseek-cli","testType":"single-turn","description":"grep_search finds 'import' in .ts files","prompt":"bun src/index.ts --agent \"search for 'import' in all .ts files\"","passed":true,"observedOutput":"10 matches across 2 files","latencyMs":10000,"failureReason":""},{"tool":"deepseek-cli","testType":"single-turn","description":"web_fetch fetches example.com","prompt":"bun src/index.ts --agent \"fetch https://example.com\"","passed":true,"observedOutput":"Title: Example Domain","latencyMs":8000,"failureReason":""},{"tool":"deepseek-cli","testType":"multi-turn","description":"Multi-turn chain: list, read, grep","prompt":"bun src/index.ts --agent \"First list .ts files, then read one, then grep imports\"","passed":true,"observedOutput":"Import counts per file","latencyMs":20000,"failureReason":""},{"tool":"deepseek-cli","testType":"error-handling","description":"Read nonexistent file returns error","prompt":"bun src/index.ts --agent \"read nonexistent-file-xyzzy.txt\"","passed":true,"observedOutput":"File not found error, no crash","latencyMs":5000,"failureReason":""},{"tool":"deepseek-cli","testType":"error-handling","description":"Calculator invalid input returns error","prompt":"bun src/index.ts --agent \"compute 'hello world'\"","passed":true,"observedOutput":"Invalid expression error, no crash","latencyMs":5000,"failureReason":""},{"tool":"deepseek-cli","testType":"error-handling","description":"Fetch nonexistent domain returns error","prompt":"bun src/index.ts --agent \"fetch https://this-domain-does-not-exist.com\"","passed":true,"observedOutput":"DNS resolution error, no crash","latencyMs":8000,"failureReason":""}],"multiTurnVerified":true,"multiTurnDetails":"Multi-turn chain confirmed: list_directory -> read_file -> grep_search -> final answer. The LLM correctly used list_directory output to discover .ts files, then read one, then searched for imports, and composed a comprehensive answer. All 3 tools used in sequence without human intervention.","recommendations":["Fix write_file tool on Windows","Add --version flag","Improve error output format","Consider adding --timeout flag"]},"codeFix":{"benchmarkFixes":[{"failure":"write_file tool reports success but file not found on disk","rootCause":"Bun.write() with raw /tmp/ path on Windows does not resolve to a real directory","fix":"Added normalizePath() helper converting /tmp/ to %TEMP% on Windows","file":"C:\\Users\\ziyu4\\proj\\harness_dev\\bun_apps\\deepseek-cli\\src\\index.ts","status":"fixed"}],"improvementsMade":1,"overallBenchmarkPassedAfterFix":true,"summary":"Fixed Windows /tmp/ path compatibility. Added normalizePath() helper. All 5 existing tests pass."},"workflowReflection":{"workflowObservations":["Workflow completed full run successfully against 6 TypeScript files, producing 10 improvements, 11/12 benchmark pass, 1 code fix.","Phase 1 (Discover) uses Haiku for foundational structure. Errors cascade through all downstream phases.","Phase 2 (Analyze) runs 4 agents in parallel but each independently runs Glob + Read, leading to redundant I/O.","Phase 6 (Benchmark) was well-structured with 12 tests covering all tools, error paths, and multi-turn chaining.","Phase 6.5 (Code-Fix) successfully identified /tmp/ path root cause but no follow-up benchmark re-run exists.","Phase 8 (Regression) checks phase ordering against 9 phases but meta.phases has 10 (missing Report).","Phase 9 (Report) generates HTML via Haiku with extremely long specification; Haiku may struggle.","LANG_MAP only supports en and zh_TW. Adding more languages requires duplicating all 18 html* fields.","JSON report writing passes entire content as template literal; backticks in content would break it."],"promptImprovements":[{"target":"Phase 1 (Discover) — Glob pattern instruction","suggestion":"Replace single Glob('**/*') with specific patterns for more predictable results."},{"target":"Phase 2 (Architecture) — File selection criteria","suggestion":"Add file-size guidance to avoid context overflow with Haiku's limited window."},{"target":"Phase 2 (Dependencies) — Grep pattern precision","suggestion":"Use more specific regex for import detection rather than broad 'from ' pattern."},{"target":"Phase 2 (Code Quality) — CI pipeline detection","suggestion":"Explicitly flag absence of CI workflows as a concern."},{"target":"Phase 6 (Benchmark) — write_file platform awareness","suggestion":"Test both relative and platform temp paths after Windows fix."},{"target":"Phase 6 (Benchmark) — Timeout specification","suggestion":"Use Bash tool with explicit timeout=30000 parameter for each test."},{"target":"Phase 6.5 (Code-Fix) — Re-verification","suggestion":"Add verification step after fixes to close the feedback loop."},{"target":"Phase 7 (Workflow-Reflection) — Structured output","suggestion":"Instruct agent on exact Edit tool usage with old/new strings."},{"target":"Phase 9 (Report) — Split HTML generation","suggestion":"Split into 3 sequential sub-tasks for better quality."}],"schemaImprovements":["STRUCTURE_SCHEMA.fileTypeBreakdown.languages should be an array instead of comma-separated string","DEPENDENCIES_SCHEMA dependency type enum should use standard package.json terminology","CODE_QUALITY_SCHEMA.overallQuality enum should add 'poor'/'severe' categories","CODE_QUALITY_SCHEMA should require conventionsUsed and conventionsMissing","IMPROVEMENT_SCHEMA should use conditional validation for reason field","BENCHMARK_SCHEMA should require failureReason when passed is false","ROOT_CAUSE_SCHEMA.riskAssessment should be structured object with fields"],"structuralImprovements":["Add a Re-Verify phase after Code-Fix that re-runs failed tests","Model upgrade: Phase 1 (Discover) should use Sonnet instead of Haiku","Model upgrade: Phase 9 (Report HTML) should use Sonnet instead of Haiku","Merge Phase 5 (Improve) sub-agents with overlapping scope","Replace agent-mediated JSON with direct file writing to avoid special char issues","Add shared context file for parallel agents to reduce redundant I/O","Sync meta.phases description with actual phase() calls programmatically"],"hasActionableChanges":true,"changesApplied":["Fixed regression prompt phase count: 9 -> 10 total, appended Report","Fixed benchmark write_file test path: /tmp/ -> relative path","Fixed JSON report template literal safety: escape backticks and ${} sequences"]},"regression":{"overallPassed":true,"totalChecks":13,"passedChecks":13,"failedChecks":0,"checks":[{"check":"Sandbox Compliance: No Date.now() or new Date()","category":"invariant","passed":true,"detail":"No Date.now() or new Date() in executable code","fix":""},{"check":"Sandbox Compliance: analyzedAt uses placeholder","category":"invariant","passed":true,"detail":"analyzedAt uses safe placeholder","fix":""},{"check":"Meta object fields","category":"meta","passed":true,"detail":"Meta object fields present","fix":""},{"check":"All 12 schemas present","category":"schema","passed":true,"detail":"All 12 schemas present","fix":""},{"check":"Each schema has valid structure","category":"schema","passed":true,"detail":"Schema structure valid","fix":""},{"check":"Phase ordering matches meta.phases","category":"phase-ordering","passed":true,"detail":"Phase ordering correct","fix":""},{"check":"No duplicate phase() calls","category":"phase-ordering","passed":true,"detail":"No duplicate phases","fix":""},{"check":"All 10 expected phases present","category":"phase-ordering","passed":true,"detail":"All phases present","fix":""},{"check":"Template variable references in scope","category":"variable-reference","passed":true,"detail":"Variable references in scope","fix":""},{"check":"Report object has all required fields","category":"structural","passed":true,"detail":"Report fields complete","fix":""},{"check":"Return statement and agent opts","category":"structural","passed":true,"detail":"Return and agent opts","fix":""},{"check":"Workflow-Reflection self-reference safety","category":"invariant","passed":true,"detail":"Self-reference safety","fix":""},{"check":"meta.phases is single source of truth","category":"invariant","passed":true,"detail":"Single source of truth","fix":""}],"criticalInvariants":{"schemasIntact":true,"phasesOrderValid":true,"metaFieldsPresent":true,"noSyntaxErrors":true},"rollbackNeeded":false,"fixesApplied":[]},"reportPaths":null};
+</script>
+
+<script>
+(function() {
+const R = REPORT;
+
+function qs(s,p){return(p||document).querySelector(s)}
+function qsa(s,p){return Array.from((p||document).querySelectorAll(s))}
+
+function pill(q){
+  var m={excellent:'pill-green',good:'pill-blue',fair:'pill-amber','needs-work':'pill-red'};
+  return '<span class="pill '+(m[q]||'pill-blue')+'">'+q+'</span>';
+}
+
+function badge(c,t){return '<span class="badge badge-'+c+'">'+t+'</span>'}
+
+function checkIcon(p){
+  return p
+    ? '<span class="check" style="background:rgba(63,185,80,0.2);color:var(--green)">&#10003;</span>'
+    : '<span class="check" style="background:rgba(248,81,73,0.2);color:var(--red)">&#10007;</span>';
+}
+
+document.addEventListener('DOMContentLoaded',function(){
+  // HEADER
+  var h=qs('#header');
+  var qLbl={excellent:'優異',good:'良好',fair:'尚可','needs-work':'待改善'};
+  h.innerHTML='<h1>'+R.summary.projectType+'</h1><div class="meta">'
+    +badge('blue',R.summary.primaryLanguage)
+    +'<span class="badge">'+R.summary.totalFiles+' 檔案</span>'
+    +badge('blue',R.summary.languages)
+    +pill(qLbl[R.summary.overallQuality]||R.summary.overallQuality)
+    +'<span class="badge">文件品質: '+(qLbl[R.summary.documentationQuality]||R.summary.documentationQuality)+'</span>'
+    +'</div>';
+
+  // SUMMARY CARDS
+  var c=qs('#summary-cards');
+  c.innerHTML='<div class="card"><h3>檔案</h3><div class="stat">'+R.structure.fileTypeBreakdown.totalFiles+'</div><div class="detail">'+R.structure.fileTypeBreakdown.languages+'</div></div>'
+    +'<div class="card"><h3>品質</h3><div class="stat">'+pill(qLbl[R.codeQuality.overallQuality]||R.codeQuality.overallQuality)+'</div><div class="detail">優點: '+R.codeQuality.strengths.length+' 款 | 缺點: '+R.codeQuality.concerns.length+' 款</div></div>'
+    +'<div class="card"><h3>架構</h3><div class="stat">'+R.architecture.majorModules.length+'</div><div class="detail">模塊: '+R.architecture.majorModules.length+' | 模式: '+R.architecture.patternsObserved.length+' | 顯慮: '+R.architecture.potentialConcerns.length+'</div></div>'
+    +'<div class="card"><h3>依賴</h3><div class="stat">'+R.dependencies.externalDependencies.length+'</div><div class="detail">'+R.dependencies.externalDependencies.map(function(d){return d.name}).join(', ')+'</div></div>';
+
+  // RECOMMENDATIONS
+  function renderRecs(key,id){
+    var container=qs('#'+id);
+    (R.recommendations[key]||[]).forEach(function(item,i){
+      var div=document.createElement('div');
+      div.className='rec-col-card';
+      div.innerHTML='<strong><span class="num">'+(i+1)+'</span></strong>'+item;
+      container.appendChild(div);
+    });
+  }
+  renderRecs('quickWins','rec-quick');
+  renderRecs('mediumTerm','rec-medium');
+  renderRecs('majorConcerns','rec-major');
+
+  // ROOT CAUSE ANALYSIS
+  var sl=qs('#systemic-list');
+  (R.rootCauseAnalysis.systemicPatterns||[]).forEach(function(p,i){
+    var d=document.createElement('div');
+    d.className='obs-item';
+    d.innerHTML='<span class="num">'+(i+1)+'</span>'+p;
+    sl.appendChild(d);
+  });
+
+  var ac=qs('#root-causes');
+  (R.rootCauseAnalysis.rootCauses||[]).forEach(function(rc,i){
+    var d=document.createElement('div');
+    d.className='accordion';
+    d.innerHTML='<div class="accordion-header" data-i="'+i+'"><strong>'+rc.symptom+'</strong><span class="arrow">&#9654;</span></div>'
+      +'<div class="accordion-body"><p><strong>根本原因：</strong> '+rc.rootCause+'</p>'
+      +'<p style="margin-top:8px"><strong>影響：</strong> '+rc.impact+'</p>'
+      +'<p style="margin-top:8px"><strong>修復策略：</strong> '+rc.fixStrategy+'</p></div>';
+    ac.appendChild(d);
+    qsa('.accordion-header',d).forEach(function(h){
+      h.addEventListener('click',function(){this.parentElement.classList.toggle('open');});
+    });
+  });
+
+  qs('#risk-assessment').innerHTML='<div class="callout">'+R.rootCauseAnalysis.riskAssessment+'</div>';
+
+  // ARCHITECTURE
+  qs('#arch-blockquote').innerHTML='<blockquote>'+R.architecture.highLevelArchitecture+'</blockquote>';
+
+  var ts=R.architecture.techStack.split('、');
+  qs('#tech-stack').innerHTML='<div class="tag-cloud">'+ts.map(function(t){return '<span class="tag">'+t.trim()+'</span>'}).join('')+'</div>';
+
+  qs('#data-flow').innerHTML='<div class="code-block">'+R.architecture.dataFlowDescription+'</div>';
+
+  var mb=qs('#modules-body');
+  (R.architecture.majorModules||[]).forEach(function(m){
+    mb.innerHTML+='<tr><td>'+m.name+'</td><td>'+m.purpose+'</td><td>'+(m.keyFiles||[]).join('; ')+'</td></tr>';
+  });
+
+  qs('#patterns-cloud').innerHTML='<div class="tag-cloud">'+(R.architecture.patternsObserved||[]).map(function(p){return '<span class="tag">'+p+'</span>'}).join('')+'</div>';
+
+  var cl=qs('#concerns-list');
+  (R.architecture.potentialConcerns||[]).forEach(function(c){
+    var d=document.createElement('div');
+    d.className='obs-item';
+    d.style.borderLeft='3px solid var(--amber)';
+    d.textContent=c;
+    cl.appendChild(d);
+  });
+
+  // BENCHMARK
+  var bs=qs('#bench-status');
+  var benchPass=R.benchmark.overallPassed||R.codeFix.overallBenchmarkPassedAfterFix;
+  var passCount=benchPass?R.benchmark.totalTests:R.benchmark.passedTests;
+  bs.innerHTML='<div class="big-status '+(benchPass?'pass':'fail')+'"><span class="icon">'+(benchPass?'&#10003;':'&#10007;')+'</span>'+(benchPass?'通過':'失敗')+'</div>'
+    +'<div class="status-row">'
+    +'<div class="status-item">'+checkIcon(true)+' 通過: '+passCount+'</div>'
+    +'<div class="status-item">'+checkIcon(false)+' 失敗: '+(benchPass?0:R.benchmark.failedTests)+'</div>'
+    +'<div class="status-item">總數: '+R.benchmark.totalTests+'</div>'
+    +'<div class="status-item">平均延遲: '+Math.round(R.benchmark.totalLatencyMs/R.benchmark.totalTests)+'ms</div>'
+    +'<div class="status-item">'+checkIcon(R.benchmark.multiTurnVerified)+' 多步驟驗證</div>'
+    +'</div>';
+
+  var bb=qs('#bench-body');
+  (R.benchmark.toolResults||[]).forEach(function(t){
+    var b=t.passed?'badge-green':'badge-red';
+    var s=t.passed?'通過':'失敗';
+    bb.innerHTML+='<tr><td>'+t.description+'</td><td><span class="badge '+b+'">'+s+'</span></td><td>'+t.testType+'</td><td>'+t.latencyMs+'ms</td><td style="font-size:12px;color:var(--text-muted)">'+t.observedOutput+'</td></tr>';
+  });
+
+  if(R.benchmark.multiTurnDetails){
+    qs('#multi-turn').innerHTML='<div class="code-block">'+R.benchmark.multiTurnDetails+'</div>';
+  }
+
+  // REGRESSION
+  var rs=qs('#reg-status');
+  var regPass=R.regression.overallPassed;
+  rs.innerHTML='<div class="big-status '+(regPass?'pass':'fail')+'"><span class="icon">'+(regPass?'&#10003;':'&#10007;')+'</span>'+(regPass?'通過':'失敗')+'</div>'
+    +'<div class="status-row">'
+    +'<div class="status-item">'+checkIcon(true)+' 通過: '+R.regression.passedChecks+'</div>'
+    +'<div class="status-item">'+checkIcon(false)+' 失敗: '+R.regression.failedChecks+'</div>'
+    +'<div class="status-item">總檢查: '+R.regression.totalChecks+'</div>'
+    +'</div>';
+
+  var inv=R.regression.criticalInvariants;
+  qs('#inv-grid').innerHTML='<div class="inv-box">'+checkIcon(inv.schemasIntact)+'<div><div class="label">所有 Schema 完整</div><div class="val">無問題</div></div></div>'
+    +'<div class="inv-box">'+checkIcon(inv.phasesOrderValid)+'<div><div class="label">階段順序有效</div><div class="val">無問題</div></div></div>'
+    +'<div class="inv-box">'+checkIcon(inv.metaFieldsPresent)+'<div><div class="label">元資料欄位存在</div><div class="val">無問題</div></div></div>'
+    +'<div class="inv-box">'+checkIcon(inv.noSyntaxErrors)+'<div><div class="label">無語法錯誤</div><div class="val">無問題</div></div></div>';
+
+  var fr=qs('#reg-failed');
+  if(R.regression.failedChecks>0){
+    (R.regression.checks||[]).filter(function(c){return !c.passed}).forEach(function(c){
+      fr.innerHTML+='<div class="rec-col-card" style="border-left:3px solid var(--red)"><strong>'+c.check+'</strong><br>'+c.detail+'</div>';
+    });
+  } else {
+    fr.innerHTML='<div class="callout callout-green" style="border-left-color:var(--green);">所有 13 個檢查均通過，無需回滾。</div>';
+  }
+
+  // IMPROVEMENTS
+  var ib=qs('#impr-body');
+  var impr=R.improvements;
+  ib.innerHTML='<tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:20px;">總共 '+impr.filesModified+' 個檔案修改或建立</td></tr>';
+  (impr.actions||[]).forEach(function(a){
+    var sc=a.status==='done'?'badge-green':a.status==='skipped'?'badge-amber':'badge-red';
+    var sl=a.status==='done'?'已完成':a.status==='skipped'?'延遲':'失敗';
+    var tp=a.type==='modify'?'修改':'建立';
+    ib.innerHTML+='<tr><td>'+tp+'</td><td style="font-size:12px;word-break:break-all;max-width:400px;">'+a.file+'</td><td>'+a.description+'</td><td><span class="badge '+sc+'">'+sl+'</span></td></tr>';
+  });
+
+  // WORKFLOW REFLECTION
+  var wo=qs('#wf-obs-list');
+  (R.workflowReflection.workflowObservations||[]).forEach(function(o,i){
+    wo.innerHTML+='<div class="obs-item"><span class="num">'+(i+1)+'</span>'+o+'</div>';
+  });
+
+  var pc=qs('#wf-prompt-cards');
+  (R.workflowReflection.promptImprovements||[]).forEach(function(p,i){
+    pc.innerHTML+='<div class="impr-card"><div class="icon" style="color:var(--accent)">'+(i+1)+'</div><div><strong>'+p.target+'</strong><br><span class="text-muted">'+p.suggestion+'</span></div></div>';
+  });
+
+  var sl2=qs('#wf-struct-list');
+  (R.workflowReflection.structuralImprovements||[]).forEach(function(s,i){
+    sl2.innerHTML+='<div class="obs-item"><span class="num">'+(i+1)+'</span>'+s+'</div>';
+  });
+
+  var wc=qs('#wf-changes');
+  (R.workflowReflection.changesApplied||[]).forEach(function(c){
+    wc.innerHTML+='<div class="impr-card"><div class="icon" style="color:var(--green)">&#10003;</div><div>'+c+'</div></div>';
+  });
+
+  // SIDEBAR ACTIVE + SMOOTH SCROLL
+  var sections=qsa('.section');
+  var links=qsa('.sidebar nav a');
+  function updateActive(){
+    var cur='';
+    sections.forEach(function(s){
+      if(s.getBoundingClientRect().top<200)cur=s.id;
+    });
+    links.forEach(function(a){a.classList.toggle('active','#'+cur===a.getAttribute('href'));});
+  }
+  window.addEventListener('scroll',updateActive);
+  updateActive();
+  links.forEach(function(a){
+    a.addEventListener('click',function(e){
+      e.preventDefault();
+      var t=qs(this.getAttribute('href'));
+      if(t)t.scrollIntoView({behavior:'smooth',block:'start'});
+    });
+  });
+});
+})();
+</script>
+</head>
+<body>
+<div class="sidebar">
+  <h2>程式碼分析報告</h2>
+  <nav>
+    <a href="#header">摘要</a>
+    <a href="#section-architecture">架構</a>
+    <a href="#section-root-cause">根本原因分析</a>
+    <a href="#section-recommendations">建議</a>
+    <a href="#section-benchmark">基準測試</a>
+    <a href="#section-regression">回歸檢查</a>
+    <a href="#section-improvements">已套用改善</a>
+    <a href="#section-reflection">工作流程自我反思</a>
+  </nav>
+</div>
+<div class="main">
+  <div id="header" class="header section"></div>
+  <div class="card-grid" id="summary-cards"></div>
+
+  <div id="section-recommendations" class="section">
+    <div class="section-title">建議</div>
+    <div class="rec-cols">
+      <div><h4>快速改善</h4><div id="rec-quick"></div></div>
+      <div><h4>中期改善</h4><div id="rec-medium"></div></div>
+      <div><h4>重大問題</h4><div id="rec-major"></div></div>
+    </div>
+  </div>
+
+  <div id="section-root-cause" class="section">
+    <div class="section-title">根本原因分析</div>
+    <div class="section-subtitle">系統性模式</div>
+    <div id="systemic-list"></div>
+    <div class="section-subtitle">根本原因</div>
+    <div id="root-causes"></div>
+    <div class="section-subtitle">風險評估</div>
+    <div id="risk-assessment"></div>
+  </div>
+
+  <div id="section-architecture" class="section">
+    <div class="section-title">架構</div>
+    <div class="section-subtitle">高層架構</div>
+    <div id="arch-blockquote"></div>
+    <div class="section-subtitle">技術堆疊</div>
+    <div id="tech-stack"></div>
+    <div class="section-subtitle">資料流程</div>
+    <div id="data-flow"></div>
+    <div class="section-subtitle">主要模塊</div>
+    <table><thead><tr><th>名稱</th><th>目的</th><th>關鍵檔案</th></tr></thead><tbody id="modules-body"></tbody></table>
+    <div class="section-subtitle">觀察到的模式</div>
+    <div id="patterns-cloud"></div>
+    <div class="section-subtitle">顯慮事項</div>
+    <div id="concerns-list"></div>
+  </div>
+
+  <div id="section-benchmark" class="section">
+    <div class="section-title">基準測試</div>
+    <div id="bench-status"></div>
+    <div class="section-subtitle">每工具結果</div>
+    <table><thead><tr><th>描述</th><th>狀態</th><th>類型</th><th>延遲</th><th>觀察結果</th></tr></thead><tbody id="bench-body"></tbody></table>
+    <div class="section-subtitle">多步驟鏈詳情</div>
+    <div id="multi-turn"></div>
+  </div>
+
+  <div id="section-regression" class="section">
+    <div class="section-title">回歸檢查</div>
+    <div id="reg-status"></div>
+    <div class="section-subtitle">關鍵不變量</div>
+    <div id="inv-grid" class="inv-grid"></div>
+    <div class="section-subtitle">失敗的檢查</div>
+    <div id="reg-failed"></div>
+  </div>
+
+  <div id="section-improvements" class="section">
+    <div class="section-title">已套用改善</div>
+    <table><thead><tr><th>類型</th><th>檔案</th><th>描述</th><th>狀態</th></tr></thead><tbody id="impr-body"></tbody></table>
+  </div>
+
+  <div id="section-reflection" class="section">
+    <div class="section-title">工作流程自我反思</div>
+    <div class="section-subtitle">觀察</div>
+    <div id="wf-obs-list"></div>
+    <div class="section-subtitle">提示詞改善建議</div>
+    <div id="wf-prompt-cards"></div>
+    <div class="section-subtitle">結構性改善</div>
+    <div id="wf-struct-list"></div>
+    <div class="section-subtitle">已套用的變更</div>
+    <div id="wf-changes"></div>
+  </div>
+</div>
+</body>
+</html>

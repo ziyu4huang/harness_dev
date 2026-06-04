@@ -1,0 +1,350 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "build",
+  "provider": {
+    "my-zai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "MY-Z.AI",
+      "options": {
+        "baseURL": "https://api.z.ai/api/coding/paas/v4",
+        "apiKey": "{env:ZAI_API_KEY}"
+      },
+      "models": {
+        "glm-5.1": { "name": "GLM-5.1", "limit": { "context": 200000, "output": 131072 } },
+        "glm-4.7": { "name": "GLM-4.7", "limit": { "context": 200000, "output": 131072 } },
+        "glm-4.5-air": { "name": "GLM-4.5-Air", "limit": { "context": 131072, "output": 16384 } },
+        "glm-5v-turbo": { "name": "GLM-5V-Turbo", "limit": { "context": 131072, "output": 8192 } }
+      }
+    },
+    "my-ds": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "My-DeepSeek",
+      "options": {
+        "baseURL": "https://api.deepseek.com",
+        "apiKey": "{env:DEEPSEEK_API_KEY}",
+        "timeout": 600000,
+        "setCacheKey": true
+      },
+      "models": {
+        "deepseek-v4-pro": {
+          "name": "DeepSeek-V4-Pro",
+          "limit": { "context": 1048576, "output": 393216 }
+        },
+        "deepseek-v4-flash": {
+          "name": "DeepSeek-V4-Flash",
+          "limit": { "context": 1048576, "output": 393216 }
+        }
+      }
+    },
+    "ds4": {
+      "name": "ds4.c (local)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "dsv4-local"
+      },
+      "models": {
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash (ds4.c local)",
+          "limit": {
+            "context": 100000,
+            "output": 384000
+          }
+        }
+      }
+    }
+  },
+  "agent": {
+    "build-my-zai": {
+      "mode": "primary",
+      "model": "my-zai/glm-5.1",
+      "description": "GLM main coding agent"
+    },
+    "plan-my-zai": {
+      "mode": "primary",
+      "model": "my-zai/glm-4.7",
+      "description": "GLM planning and analysis",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny"
+      }
+    },
+    "explore-my-zai": {
+      "mode": "subagent",
+      "model": "my-zai/glm-4.5-air",
+      "description": "GLM fast codebase exploration"
+    },
+    "build-my-ds": {
+      "mode": "all",
+      "model": "my-ds/deepseek-v4-pro",
+      "description": "My-DeepSeek V4 Pro coding agent"
+    },
+    "plan-my-ds": {
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "description": "My-DeepSeek V4 Pro planning and analysis",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny"
+      }
+    },
+    "explore-my-ds": {
+      "mode": "subagent",
+      "model": "my-ds/deepseek-v4-flash",
+      "description": "DeepSeek V4 Flash exploration"
+    },
+    "ds4": {
+      "description": "DeepSeek V4 Flash served by local ds4-server",
+      "model": "ds4/deepseek-v4-flash",
+      "temperature": 0
+    },
+    "office-router": {
+      "description": "辦公室智能路由 (Flash) - 判斷訊息應交給哪個專員，直接轉發",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-flash",
+      "prompt": "{file:./agents/office-router.md}",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
+        "task": {
+          "*": "deny",
+          "office-ops": "allow",
+          "business-reg": "allow",
+          "mail-manager": "allow",
+          "meeting-room": "allow",
+          "contract-mgr": "allow"
+        }
+      }
+    },
+    "office-router-large": {
+      "description": "辦公室智能路由 (Pro) - 判斷訊息應交給哪個專員，直接轉發",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "prompt": "{file:./agents/office-router.md}",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
+        "task": {
+          "*": "deny",
+          "office-ops-large": "allow",
+          "business-reg-large": "allow",
+          "mail-manager-large": "allow",
+          "meeting-room-large": "allow",
+          "contract-mgr-large": "allow"
+        }
+      }
+    },
+    "office-ops": {
+      "description": "實辦行政助手 (Flash) - 處理日常辦公室行政事務、話術查詢、例行通知",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-flash",
+      "prompt": "{file:./agents/office-ops.md}",
+      "permission": { "edit": "allow", "bash": "ask" }
+    },
+    "office-ops-large": {
+      "description": "實辦行政助手 (Pro) - 處理日常辦公室行政事務、話術查詢、例行通知",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "prompt": "{file:./agents/office-ops.md}",
+      "permission": { "edit": "allow", "bash": "ask" }
+    },
+    "business-reg": {
+      "description": "營登專員 (Flash) - 處理營業登記、國稅局文書、設立/解散/遷址申報",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-flash",
+      "prompt": "{file:./agents/business-reg.md}",
+      "permission": { "edit": "allow", "bash": "deny" }
+    },
+    "business-reg-large": {
+      "description": "營登專員 (Pro) - 處理營業登記、國稅局文書、設立/解散/遷址申報",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "prompt": "{file:./agents/business-reg.md}",
+      "permission": { "edit": "allow", "bash": "deny" }
+    },
+    "mail-manager": {
+      "description": "信件管理員 (Flash) - 處理信件收發、寄放、掃描、便利帶寄出",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-flash",
+      "prompt": "{file:./agents/mail-manager.md}",
+      "permission": { "edit": "allow", "bash": "ask" }
+    },
+    "mail-manager-large": {
+      "description": "信件管理員 (Pro) - 處理信件收發、寄放、掃描、便利帶寄出",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "prompt": "{file:./agents/mail-manager.md}",
+      "permission": { "edit": "allow", "bash": "ask" }
+    },
+    "meeting-room": {
+      "description": "會議室管理員 (Flash) - 處理聚峰館/喜陽館會議室租借、收支明細",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-flash",
+      "prompt": "{file:./agents/meeting-room.md}",
+      "permission": { "edit": "allow", "bash": "deny" }
+    },
+    "meeting-room-large": {
+      "description": "會議室管理員 (Pro) - 處理聚峰館/喜陽館會議室租借、收支明細",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "prompt": "{file:./agents/meeting-room.md}",
+      "permission": { "edit": "allow", "bash": "deny" }
+    },
+    "contract-mgr": {
+      "description": "合約管理員 (Flash) - 處理合約提供、續約通知、收款確認、發票開立",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-flash",
+      "prompt": "{file:./agents/contract-mgr.md}",
+      "permission": { "edit": "allow", "bash": "ask" }
+    },
+    "contract-mgr-large": {
+      "description": "合約管理員 (Pro) - 處理合約提供、續約通知、收款確認、發票開立",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "prompt": "{file:./agents/contract-mgr.md}",
+      "permission": { "edit": "allow", "bash": "ask" }
+    },
+    "reviewer-zai": {
+      "description": "Code reviewer using DeepSeek - Reviews code, plans, and answers questions",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "permission": { "edit": "ask", "bash": "ask" }
+    },
+    "explore": {
+      "description": "Fast codebase explorer - Searches files, answers codebase questions",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-flash",
+      "permission": { "edit": "deny", "bash": "allow" }
+    },
+    "build": {
+      "description": "Full-permission build agent - edit/bash/task all allowed",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "permission": { "edit": "allow", "bash": "allow", "task": { "*": "allow" } }
+    },
+    "plan": {
+      "description": "Full-permission plan agent - edit/bash/task all allowed",
+      "mode": "primary",
+      "model": "my-ds/deepseek-v4-pro",
+      "permission": { "edit": "allow", "bash": "allow", "task": { "*": "allow" } }
+    },
+    "gcc-coordinator": {
+      "description": "GCC content coordinator — routes tasks to specialist agents",
+      "mode": "primary",
+      "model": "my-zai/glm-5.1",
+      "prompt": "{file:./agents/gcc-coordinator.md}",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "task": {
+          "*": "allow",
+          "gcc-story-advisor": "allow",
+          "gcc-character-designer": "allow",
+          "gcc-combat-designer": "allow",
+          "gcc-world-builder": "allow",
+          "gcc-reviewer": "allow",
+          "gcc-game-mapper": "allow"
+        }
+      }
+    },
+    "gcc-story-advisor": {
+      "description": "Story advisor — narrative architecture, pacing, foreshadowing, character arcs",
+      "mode": "subagent",
+      "model": "my-zai/glm-5.1",
+      "prompt": "{file:./agents/gcc-story-advisor.md}",
+      "permission": {
+        "edit": "allow",
+        "bash": "ask"
+      }
+    },
+    "gcc-character-designer": {
+      "description": "Character designer — profiles, personalities, relationships, cultivation paths",
+      "mode": "subagent",
+      "model": "my-zai/glm-5.1",
+      "prompt": "{file:./agents/gcc-character-designer.md}",
+      "permission": {
+        "edit": "allow",
+        "bash": "ask"
+      }
+    },
+    "gcc-combat-designer": {
+      "description": "Combat designer — battle scenes, power systems, technique naming, pacing",
+      "mode": "subagent",
+      "model": "my-zai/glm-5.1",
+      "prompt": "{file:./agents/gcc-combat-designer.md}",
+      "permission": {
+        "edit": "allow",
+        "bash": "ask"
+      }
+    },
+    "gcc-world-builder": {
+      "description": "World builder — cultivation systems, geography, factions, setting consistency",
+      "mode": "subagent",
+      "model": "my-zai/glm-5.1",
+      "prompt": "{file:./agents/gcc-world-builder.md}",
+      "permission": {
+        "edit": "allow",
+        "bash": "ask"
+      }
+    },
+    "gcc-reviewer": {
+      "description": "Content reviewer — consistency checks, quality assessment, continuity audits",
+      "mode": "subagent",
+      "model": "my-zai/glm-5.1",
+      "prompt": "{file:./agents/gcc-reviewer.md}",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow"
+      }
+    },
+    "gcc-game-mapper": {
+      "description": "Game data mapper — narrative to game data (encounter, card, enemy, skill)",
+      "mode": "subagent",
+      "model": "my-zai/glm-5.1",
+      "prompt": "{file:./agents/gcc-game-mapper.md}",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow"
+      }
+    }
+  },
+  "mcp": {
+    "web-search-prime": {
+      "type": "remote",
+      "url": "https://api.z.ai/api/mcp/web_search_prime/mcp",
+      "headers": {
+        "Authorization": "Bearer {env:ZAI_API_KEY}"
+      }
+    },
+    "web-reader": {
+      "type": "remote",
+      "url": "https://api.z.ai/api/mcp/web_reader/mcp",
+      "headers": {
+        "Authorization": "Bearer {env:ZAI_API_KEY}"
+      }
+    },
+    "zread": {
+      "type": "remote",
+      "url": "https://api.z.ai/api/mcp/zread/mcp",
+      "headers": {
+        "Authorization": "Bearer {env:ZAI_API_KEY}"
+      }
+    },
+    "zai-mcp-server": {
+      "type": "local",
+      "command": ["bunx", "-y", "@z_ai/mcp-server"],
+      "environment": {
+        "ZAI_API_KEY": "{env:ZAI_API_KEY}",
+        "Z_AI_MODE": "ZAI"
+      }
+    }
+  },
+  "instructions": ["AGENTS.md"],
+  "permission": {
+    "bash": {
+      "*": "ask",
+      "cargo*": "allow",
+      "git*": "allow"
+    }
+  }
+}

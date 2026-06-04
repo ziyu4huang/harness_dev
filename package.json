@@ -1,0 +1,10 @@
+{
+  "name": "harness_dev",
+  "private": true,
+  "scripts": {
+    "build": "bun run --filter deepseek-cli build"
+  },
+  "workspaces": [
+    "bun_apps/*"
+  ]
+}

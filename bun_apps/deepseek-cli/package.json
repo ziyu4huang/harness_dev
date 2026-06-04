@@ -1,0 +1,19 @@
+{
+  "name": "deepseek-cli",
+  "description": "Minimal CLI for calling DeepSeek's language models (pro/flash) via the Vercel AI SDK",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "deepseek-cli": "src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outfile \"../../dist/deepseek-cli.js\" --target bun --minify",
+    "start": "bun src/index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^1.3.0",
+    "ai": "^4.1.0",
+    "zod": "^3.0.0"
+  }
+}

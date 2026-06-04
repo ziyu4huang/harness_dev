@@ -1,0 +1,3 @@
+[install]
+# hoisted = single root node_modules shared across all workspace packages
+linker = "hoisted"
