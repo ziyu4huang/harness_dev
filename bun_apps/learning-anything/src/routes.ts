@@ -25,7 +25,7 @@ import { getEnv, LIMITS } from "./config.js";
 import * as agent from "./agent.js";
 import type { AgentMessage } from "./agent.js";
 import { validateGraph } from "./validate.js";
-import { requestLogger, logResponse, rateLimiter, classifyError, checkResponseCache, storeResponseCache, invalidateResponseCache } from "./middleware.js";
+import { requestLogger, logResponse, rateLimiter, classifyError, checkResponseCache, storeResponseCache, invalidateResponseCache, getMetrics, getCacheSize, MAX_CACHE_ENTRIES } from "./middleware.js";
 import { createIgnoreFilter } from "./ignore.js";
 import { generateHeuristicTour, type TourGroupingMode } from "./tour.js";
 import { cosineSimilarity } from "./semantic-search.js";
@@ -67,6 +67,25 @@ function parsePath(url: string): { segments: string[]; query: URLSearchParams } 
   const u = new URL(url);
   const segments = u.pathname.replace(/^\/+|\/+$/g, "").split("/");
   return { segments, query: u.searchParams };
+}
+
+/**
+ * Validate and decode a dynamic path parameter (node ID, layer ID).
+ * Rejects IDs that are too long, contain path traversal patterns, null bytes,
+ * or have malformed percent encoding.
+ */
+function validateAndDecodeId(raw: string): { ok: true; id: string } | { ok: false; response: Response } {
+  if (raw.length > 512) {
+    return { ok: false, response: error("ID parameter exceeds maximum length of 512 characters", 400) };
+  }
+  if (raw.includes("..") || raw.includes("\0")) {
+    return { ok: false, response: error("ID parameter contains invalid characters", 400) };
+  }
+  try {
+    return { ok: true, id: decodeURIComponent(raw) };
+  } catch {
+    return { ok: false, response: error("ID parameter contains malformed percent encoding", 400) };
+  }
 }
 
 // ─── Route Handler Type ──────────────────────────────────────────────────────
@@ -218,6 +237,11 @@ const GET_ROUTES: Record<string, Handler> = {
     }));
     return json({ concepts: summary, totalConcepts: summary.length });
   },
+
+  "api/metrics": async () => {
+    const snapshot = getMetrics(getCacheSize(), MAX_CACHE_ENTRIES);
+    return json(snapshot);
+  },
 };
 
 // Dynamic path routes (need special handling)
@@ -229,7 +253,9 @@ async function handleDynamicGet(
   // /api/nodes/:id
   const nodeMatch = segments.join("/").match(/^api\/nodes\/([^/]+)$/);
   if (nodeMatch) {
-    const id = decodeURIComponent(nodeMatch[1]);
+    const decoded = validateAndDecodeId(nodeMatch[1]);
+    if (!decoded.ok) return decoded.response;
+    const id = decoded.id;
     const suffix = query.get("view");
     if (suffix === "neighbors" || id.includes("/neighbors")) {
       const nodeId = id.replace(/\/neighbors$/, "");
@@ -251,7 +277,9 @@ async function handleDynamicGet(
   // /api/layers/:id
   const layerMatch = segments.join("/").match(/^api\/layers\/([^/]+)$/);
   if (layerMatch) {
-    const id = decodeURIComponent(layerMatch[1]);
+    const decoded = validateAndDecodeId(layerMatch[1]);
+    if (!decoded.ok) return decoded.response;
+    const id = decoded.id;
     const nodes = graphStore.getLayerNodes(id);
     if (nodes.length === 0) return error("Layer not found", 404);
     return json({ layerId: id, nodes, count: nodes.length });

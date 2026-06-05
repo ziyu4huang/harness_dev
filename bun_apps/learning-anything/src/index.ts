@@ -103,6 +103,7 @@ console.log(`  GET  /api/staleness          Check graph freshness (UA port)`);
 console.log(`  GET  /api/health/detailed    Detailed health + layer scores`);
 console.log(`  GET  /api/hotspots           Complexity hotspots`);
 console.log(`  GET  /api/path?from=&to=     Path between nodes`);
+console.log(`  GET  /api/validate           Graph validation results`);
 console.log(`  POST /api/graph/reload       Reload graph from disk`);
 console.log(`  POST /api/graph/save         Save graph to disk`);
 console.log(`  POST /api/graph/merge        Merge incremental updates`);
@@ -116,6 +117,7 @@ console.log(`  GET  /api/layers/detect      Heuristic layer detection`);
 console.log(`  POST /api/layers/detect/llm  LLM-based layer detection`);
 console.log(`  POST /api/tour/language-lesson Generate language lesson for node`);
 console.log(`  GET  /api/language/concepts  Detect language concepts across graph`);
+console.log(`  GET  /api/metrics            Request/response metrics (latency, error rate, cache)`);
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────────────
 

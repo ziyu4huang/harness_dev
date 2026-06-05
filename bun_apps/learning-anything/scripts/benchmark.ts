@@ -1026,7 +1026,135 @@ async function benchmark(): Promise<BenchmarkReport> {
         failureReason: validateHttpOk ? undefined : `Validate: status=${validateResp.status}, valid=${validateResp.body?.valid}`,
       });
 
+      // ─── Endpoint Response Schema Validation Tests ─────────────────────────
+      // Deep schema checks that verify each response body matches the expected shape.
+
+      // Schema Test 1: /api/stats has all required fields
+      const st1 = Date.now();
+      const statsSchemaResp = await fetchEndpoint("GET", "/api/stats");
+      const statsBody = statsSchemaResp.body;
+      const statsSchemaRequired = ["project", "version", "totalNodes", "totalEdges", "layers", "tourSteps", "nodeTypes", "edgeTypes"];
+      const statsSchemaOk = statsSchemaResp.status === 200
+        && statsSchemaRequired.every(k => statsBody?.[k] !== undefined)
+        && typeof statsBody.totalNodes === "number"
+        && typeof statsBody.totalEdges === "number"
+        && typeof statsBody.project === "string"
+        && typeof statsBody.nodeTypes === "object" && statsBody.nodeTypes !== null
+        && typeof statsBody.edgeTypes === "object" && statsBody.edgeTypes !== null;
+      results.push({
+        name: "schema-stats-response",
+        category: "schema",
+        passed: statsSchemaOk,
+        latencyMs: Date.now() - st1,
+        failureReason: statsSchemaOk ? undefined : `Stats schema: missing keys=[${statsSchemaRequired.filter(k => statsBody?.[k] === undefined)}]`,
+      });
+
+      // Schema Test 2: /api/nodes - each node has required fields
+      const st2 = Date.now();
+      const nodesSchemaResp = await fetchEndpoint("GET", "/api/nodes");
+      const nodesBody = nodesSchemaResp.body;
+      let nodesSchemaOk = nodesSchemaResp.status === 200 && Array.isArray(nodesBody?.nodes);
+      if (nodesSchemaOk && nodesBody.nodes.length > 0) {
+        const nodeFields = ["id", "name", "type", "summary", "tags"];
+        for (const node of nodesBody.nodes) {
+          for (const field of nodeFields) {
+            if (node[field] === undefined) {
+              nodesSchemaOk = false;
+              break;
+            }
+          }
+          if (typeof node.id !== "string" || typeof node.name !== "string" || typeof node.type !== "string" || typeof node.summary !== "string" || !Array.isArray(node.tags)) {
+            nodesSchemaOk = false;
+            break;
+          }
+        }
+      }
+      results.push({
+        name: "schema-nodes-response",
+        category: "schema",
+        passed: nodesSchemaOk,
+        latencyMs: Date.now() - st2,
+        failureReason: nodesSchemaOk ? undefined : `Nodes schema: nodes array invalid, count=${nodesBody?.nodes?.length}`,
+      });
+
+      // Schema Test 3: /api/search?q=auth has required fields
+      const st3 = Date.now();
+      const searchSchemaResp = await fetchEndpoint("GET", "/api/search?q=auth");
+      const searchBody = searchSchemaResp.body;
+      const searchSchemaOk = searchSchemaResp.status === 200
+        && typeof searchBody?.query === "string"
+        && Array.isArray(searchBody?.nodes)
+        && typeof searchBody?.count === "number";
+      results.push({
+        name: "schema-search-response",
+        category: "schema",
+        passed: searchSchemaOk,
+        latencyMs: Date.now() - st3,
+        failureReason: searchSchemaOk ? undefined : `Search schema: query=${typeof searchBody?.query}, nodes=${Array.isArray(searchBody?.nodes)}, count=${typeof searchBody?.count}`,
+      });
+
+      // Schema Test 4: /api/layers - each layer has required fields
+      const st4 = Date.now();
+      const layersSchemaResp = await fetchEndpoint("GET", "/api/layers");
+      const layersBody = layersSchemaResp.body;
+      let layersSchemaOk = layersSchemaResp.status === 200 && Array.isArray(layersBody);
+      if (layersSchemaOk) {
+        const layerFields = ["id", "name", "description", "nodeIds"];
+        for (const layer of layersBody) {
+          for (const field of layerFields) {
+            if (layer[field] === undefined) {
+              layersSchemaOk = false;
+              break;
+            }
+          }
+          if (!Array.isArray(layer.nodeIds)) {
+            layersSchemaOk = false;
+            break;
+          }
+        }
+      }
+      results.push({
+        name: "schema-layers-response",
+        category: "schema",
+        passed: layersSchemaOk,
+        latencyMs: Date.now() - st4,
+        failureReason: layersSchemaOk ? undefined : `Layers schema: array=${Array.isArray(layersBody)}, count=${layersBody?.length}`,
+      });
+
+      // Schema Test 5: Malformed percent-encoded node ID returns 400 (not 500)
+      const st5 = Date.now();
+      const badIdResp = await fetchEndpoint("GET", "/api/nodes/%E0%A4%A");
+      const badIdOk = badIdResp.status === 400;
+      results.push({
+        name: "schema-malformed-id-400",
+        category: "schema",
+        passed: badIdOk,
+        latencyMs: Date.now() - st5,
+        failureReason: badIdOk ? undefined : `Malformed ID: expected 400, got ${badIdResp.status}`,
+      });
+
+      // Schema Test 6: GET /api/metrics has required fields
+      const st6 = Date.now();
+      const metricsSchemaResp = await fetchEndpoint("GET", "/api/metrics");
+      const metricsBody = metricsSchemaResp.body;
+      const metricsSchemaOk = metricsSchemaResp.status === 200
+        && typeof metricsBody?.totalRequests === "number"
+        && typeof metricsBody?.totalErrors === "number"
+        && typeof metricsBody?.avgResponseMs === "number"
+        && typeof metricsBody?.cacheSize === "number"
+        && typeof metricsBody?.cacheMaxSize === "number"
+        && typeof metricsBody?.uptimeMs === "number"
+        && typeof metricsBody?.endpoints === "object";
+      results.push({
+        name: "schema-metrics-response",
+        category: "schema",
+        passed: metricsSchemaOk,
+        latencyMs: Date.now() - st6,
+        failureReason: metricsSchemaOk ? undefined : `Metrics schema: totalRequests=${typeof metricsBody?.totalRequests}, endpoints=${typeof metricsBody?.endpoints}`,
+      });
+
       features.push({ feature: "http-integration-tests", status: "present", evidence: "10 HTTP endpoint tests covering health, stats, nodes, search, 404, validation, CORS, headers" });
+      features.push({ feature: "schema-validation", status: "present", evidence: "6 schema validation tests for stats, nodes, search, layers, metrics, malformed ID" });
     } catch (err) {
       results.push({
         name: "http-integration-tests",

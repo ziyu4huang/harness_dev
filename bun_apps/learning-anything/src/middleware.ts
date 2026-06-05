@@ -20,6 +20,95 @@ export interface MiddlewareContext {
   clientIp: string;
 }
 
+// ─── Metrics Collector ────────────────────────────────────────────────────────
+
+interface EndpointMetrics {
+  count: number;
+  errorCount: number;
+  totalMs: number;
+  maxMs: number;
+}
+
+export interface MetricsSnapshot {
+  endpoints: Record<string, EndpointMetrics>;
+  totalRequests: number;
+  totalErrors: number;
+  avgResponseMs: number;
+  cacheSize: number;
+  cacheMaxSize: number;
+  uptimeMs: number;
+}
+
+class MetricsCollector {
+  private endpoints = new Map<string, EndpointMetrics>();
+  private totalRequests = 0;
+  private totalErrors = 0;
+  private startTime = Date.now();
+
+  record(method: string, path: string, status: number, elapsedMs: number): void {
+    // Normalize path to group dynamic segments (e.g., /api/nodes/some-id -> /api/nodes/:id)
+    const normalizedPath = this.normalizePath(method, path);
+    const key = `${method} ${normalizedPath}`;
+
+    this.totalRequests++;
+    let entry = this.endpoints.get(key);
+    if (!entry) {
+      entry = { count: 0, errorCount: 0, totalMs: 0, maxMs: 0 };
+      this.endpoints.set(key, entry);
+    }
+    entry.count++;
+    entry.totalMs += elapsedMs;
+    if (elapsedMs > entry.maxMs) entry.maxMs = elapsedMs;
+    if (status >= 400) {
+      entry.errorCount++;
+      this.totalErrors++;
+    }
+  }
+
+  private normalizePath(method: string, path: string): string {
+    // Replace hex-looking IDs and long segments after known prefixes
+    return path
+      .replace(/\/api\/nodes\/[^/]+/, "/api/nodes/:id")
+      .replace(/\/api\/layers\/[^/]+/, "/api/layers/:id");
+  }
+
+  getSnapshot(cacheSize: number, cacheMaxSize: number): MetricsSnapshot {
+    const endpoints: Record<string, EndpointMetrics> = {};
+    // Sort by count descending
+    const sorted = [...this.endpoints.entries()].sort((a, b) => b[1].count - a[1].count);
+    for (const [key, val] of sorted) {
+      endpoints[key] = val;
+    }
+    return {
+      endpoints,
+      totalRequests: this.totalRequests,
+      totalErrors: this.totalErrors,
+      avgResponseMs: this.totalRequests > 0
+        ? Math.round([...this.endpoints.values()].reduce((s, e) => s + e.totalMs, 0) / this.totalRequests)
+        : 0,
+      cacheSize,
+      cacheMaxSize,
+      uptimeMs: Date.now() - this.startTime,
+    };
+  }
+}
+
+const metricsCollector = new MetricsCollector();
+
+/**
+ * Record a request's metrics. Called from logResponse.
+ */
+export function recordMetric(method: string, path: string, status: number, elapsedMs: number): void {
+  metricsCollector.record(method, path, status, elapsedMs);
+}
+
+/**
+ * Get the current metrics snapshot.
+ */
+export function getMetrics(cacheSize: number, cacheMaxSize: number): MetricsSnapshot {
+  return metricsCollector.getSnapshot(cacheSize, cacheMaxSize);
+}
+
 export interface RateLimiterOptions {
   maxRequests: number;
   windowMs: number;
@@ -79,10 +168,13 @@ export function requestLogger(method: string, path: string, clientIp: string): M
 }
 
 /**
- * Logs the completed request with timing information.
+ * Logs the completed request with timing information and records metrics.
  */
 export function logResponse(ctx: MiddlewareContext, status: number): void {
   const elapsed = Date.now() - ctx.startTime;
+
+  // Feed the metrics collector
+  recordMetric(ctx.method, ctx.path, status, elapsed);
 
   if (shouldLog("info")) {
     const level = status >= 500 ? "ERR" : status >= 400 ? "WARN" : "OK ";
@@ -240,6 +332,9 @@ let responseCache = new Map<string, CacheEntry>();
 /** Default cache TTL for GET responses (30 seconds). */
 const DEFAULT_CACHE_TTL_MS = 30_000;
 
+/** Maximum number of cached GET responses. Oldest evicted when exceeded. */
+export const MAX_CACHE_ENTRIES = 200;
+
 /**
  * Generate an ETag from a response body.
  */
@@ -278,6 +373,10 @@ export function checkResponseCache(
     return null;
   }
 
+  // Refresh LRU position: delete and re-insert at end
+  responseCache.delete(cacheKey);
+  responseCache.set(cacheKey, entry);
+
   // Check If-None-Match for 304
   if (ifNoneMatch && ifNoneMatch === entry.etag) {
     return new Response(null, {
@@ -301,6 +400,9 @@ export function checkResponseCache(
 
 /**
  * Store a response in the cache (GET requests only).
+ * Enforces MAX_CACHE_ENTRIES with LRU eviction: when the cache is full,
+ * the oldest entry (first inserted) is removed before adding the new one.
+ * Re-accessing an entry via checkResponseCache moves it to the end (most recent).
  */
 export function storeResponseCache(
   method: string,
@@ -311,6 +413,23 @@ export function storeResponseCache(
 ): void {
   if (method !== "GET") return;
   const cacheKey = `${method}:${path}?${query}`;
+
+  // If this key already exists, delete first so re-insert places it at the end (LRU refresh)
+  if (responseCache.has(cacheKey)) {
+    responseCache.delete(cacheKey);
+  }
+
+  // Evict oldest entries if at capacity
+  while (responseCache.size >= MAX_CACHE_ENTRIES) {
+    // Map iterates in insertion order; first key is the oldest
+    const oldestKey = responseCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      responseCache.delete(oldestKey);
+    } else {
+      break;
+    }
+  }
+
   responseCache.set(cacheKey, {
     body,
     headers: { ...headers },
@@ -339,5 +458,12 @@ export function cleanup(): void {
   }
   responseCache.clear();
   rateLimitStore.clear();
+}
+
+/**
+ * Get the current response cache size (for metrics reporting).
+ */
+export function getCacheSize(): number {
+  return responseCache.size;
 }
 

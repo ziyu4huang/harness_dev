@@ -379,6 +379,81 @@ async function check(): Promise<QualityReport> {
   });
   if (!coveragePass) score -= 10;
 
+  // Gate 15: API endpoint consistency — cross-check routes.ts vs index.ts banner
+  let endpointConsistencyPass = true;
+  let missingFromBanner: string[] = [];
+  let staleBannerEntries: string[] = [];
+  if (existsSync(routesFile)) {
+    const routesContent = readFileSync(routesFile, "utf-8");
+    const indexFile = join(ROOT, "src", "index.ts");
+    const indexContent = existsSync(indexFile) ? readFileSync(indexFile, "utf-8") : "";
+
+    // Extract endpoint paths from routes.ts: strings matching "api/..." in GET_ROUTES and POST_ROUTES
+    const routeEndpointRe = /"(api\/[^"]+)"/g;
+    const routeEndpoints = new Set<string>();
+    let rMatch: RegExpExecArray | null;
+    while ((rMatch = routeEndpointRe.exec(routesContent)) !== null) {
+      routeEndpoints.add(rMatch[1]);
+    }
+
+    // Also extract dynamic route patterns from handleDynamicGet regexes
+    // Matches patterns like: /^api\/nodes\/([^/]+)$/ -> extracts "api/nodes/:id"
+    // and /^api\/path$/ -> extracts "api/path"
+    const dynamicRouteRe = /\^api\\\/(\w+)\\\/\(\[\^\/\]\+\)\$/g;
+    let dMatch: RegExpExecArray | null;
+    while ((dMatch = dynamicRouteRe.exec(routesContent)) !== null) {
+      routeEndpoints.add(`api/${dMatch[1]}/:id`);
+    }
+    // Also match /^api\/path$/
+    const pathMatchRe = /\^api\\\/path\$/g;
+    if (pathMatchRe.test(routesContent)) {
+      routeEndpoints.add("api/path");
+    }
+
+    // Extract endpoint paths from index.ts banner: lines containing '/api/'
+    const bannerEndpointRe = /\/(api\/\S+)/g;
+    const bannerEndpoints = new Set<string>();
+    let bMatch: RegExpExecArray | null;
+    while ((bMatch = bannerEndpointRe.exec(indexContent)) !== null) {
+      // Trim trailing punctuation and query params
+      const cleaned = bMatch[1].replace(/[\s,;]+$/, "").split("?")[0];
+      bannerEndpoints.add(cleaned);
+    }
+
+    // Find endpoints in routes but missing from banner
+    for (const ep of routeEndpoints) {
+      // Also check without the :id/:path suffix for dynamic routes
+      const baseEp = ep.replace(/\/:[^/]+$/, "");
+      const inBanner = [...bannerEndpoints].some(b => b === ep || b === baseEp || b.startsWith(ep));
+      if (!inBanner) {
+        missingFromBanner.push(ep);
+      }
+    }
+
+    // Find banner entries that don't match any route
+    for (const bEp of bannerEndpoints) {
+      const inRoutes = [...routeEndpoints].some(r => r === bEp || r.startsWith(bEp) || bEp.startsWith(r));
+      if (!inRoutes) {
+        staleBannerEntries.push(bEp);
+      }
+    }
+
+    endpointConsistencyPass = missingFromBanner.length === 0 && staleBannerEntries.length === 0;
+  }
+  gates.push({
+    gate: "endpoint-consistency",
+    passed: endpointConsistencyPass,
+    severity: "warning",
+    message: endpointConsistencyPass
+      ? "All routes.ts endpoints are listed in index.ts banner"
+      : `Endpoint inconsistencies: ${missingFromBanner.length} missing from banner, ${staleBannerEntries.length} stale banner entries`,
+    detail: [
+      ...missingFromBanner.map(e => `Missing from banner: ${e}`),
+      ...staleBannerEntries.map(e => `Stale banner entry: ${e}`),
+    ].join("\n"),
+  });
+  score -= (missingFromBanner.length + staleBannerEntries.length) * 2;
+
   const overallPassed = score >= 60 && !gates.some(g => g.severity === "critical" && !g.passed);
 
   return {

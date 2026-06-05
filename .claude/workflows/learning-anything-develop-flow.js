@@ -5,6 +5,7 @@ export const meta = {
   phases: [
     { title: 'Resolve', detail: 'Detect absolute project root path via git rev-parse' },
     { title: 'Preflight', detail: 'Check if UA dashboard is reachable before Learn phase' },
+    { title: 'Graph Diagnostic', detail: 'Check if knowledge graph files exist for gap analysis' },
     { title: 'Learn', detail: 'Query UA dashboard API + read UA plugin source files to catalog features' },
     { title: 'Gap Analysis', detail: 'Compare UA features vs bun-app features, identify missing capabilities with priorities' },
     { title: 'History', detail: 'Load metrics history from previous runs, display trend summary' },
@@ -526,6 +527,47 @@ if (!dashboardAvailable) {
   log(`  WARNING: Dashboard not available. Learn phase will use file-based fallback only.`)
 }
 
+// ─── Phase 0.75: Graph Quality Self-Diagnostic ────────────────────────────────
+// Check if the knowledge graph files needed for gap analysis exist.
+// If missing, skip graph comparison with a clear log message instead of
+// silently producing empty comparison context.
+
+phase('Graph Diagnostic')
+
+const GRAPH_DIAGNOSTIC_SCHEMA = {
+  type: 'object',
+  properties: {
+    laGraphExists: { type: 'boolean' },
+    uaGraphExists: { type: 'boolean' },
+    graphComparisonSkipped: { type: 'boolean' },
+    skipReason: { type: 'string' },
+  },
+  required: ['laGraphExists', 'uaGraphExists', 'graphComparisonSkipped'],
+}
+
+const graphDiagnostic = await agent(
+  `Check if the knowledge graph files needed for gap analysis exist.
+
+  Step 1: Check the learning-anything graph:
+  Bash("Test-Path 'C:/Users/ziyu4/proj/harness_dev/bun_apps/deepseek-cli/.learning-anything/knowledge-graph.json'")
+
+  Step 2: Check the understand-anything graph:
+  Bash("Test-Path 'C:/Users/ziyu4/proj/harness_dev/bun_apps/deepseek-cli/.understand-anything/knowledge-graph.json'")
+
+  Return { laGraphExists: true/false, uaGraphExists: true/false, graphComparisonSkipped: true/false, skipReason: "..." }.
+  Set graphComparisonSkipped to true if EITHER file is missing. Set skipReason to explain which file is missing.`,
+  { label: 'graph-diagnostic', phase: 'Graph Diagnostic', model: 'haiku', schema: GRAPH_DIAGNOSTIC_SCHEMA },
+)
+
+const graphComparisonSkipped = graphDiagnostic?.graphComparisonSkipped ?? true
+const graphSkipReason = graphDiagnostic?.skipReason ?? 'Graph diagnostic did not return results'
+log(`Graph Diagnostic: LA graph=${graphDiagnostic?.laGraphExists ? 'exists' : 'MISSING'}, UA graph=${graphDiagnostic?.uaGraphExists ? 'exists' : 'MISSING'}`)
+if (graphComparisonSkipped) {
+  log(`  Graph comparison will be SKIPPED: ${graphSkipReason}`)
+} else {
+  log(`  Graph comparison will proceed with both files available.`)
+}
+
 // ─── Phase 0: Learn from Understand-Anything dashboard ───────────────────────
 
 phase('Learn')
@@ -645,6 +687,79 @@ if (previousIterationGaps) {
   log(`Gap Diff: Previous iteration had ${previousIterationGaps.remainingGaps ?? '?'} remaining gaps (${previousIterationGaps.highPriorityGaps ?? '?'} high priority)`)
 }
 
+// ── Graph Quality Comparison (.learning-anything vs .understand-anything) ──
+// Compare the two knowledge graphs produced for deepseek-cli to identify
+// quality gaps in the bun-app's graph generation vs the UA plugin's output.
+// Skipped if the Graph Diagnostic phase determined the files are missing.
+let graphComparisonContext = ''
+if (graphComparisonSkipped) {
+  log(`Graph comparison: SKIPPED (${graphSkipReason})`)
+} else {
+try {
+  const laGraphRaw = await agent(
+    `Read the learning-anything knowledge graph for deepseek-cli and summarize its structure.
+    Run: Bash("cat C:/Users/ziyu4/proj/harness_dev/bun_apps/deepseek-cli/.learning-anything/knowledge-graph.json | head -200")
+    Return: total nodes, edges, layers, tour steps, node types breakdown, edge types breakdown.`,
+    { label: 'graph-compare-la', phase: 'Gap Analysis', model: 'haiku', schema: {
+      type: 'object',
+      properties: {
+        nodes: { type: 'number' }, edges: { type: 'number' },
+        layers: { type: 'number' }, tourSteps: { type: 'number' },
+        nodeTypes: { type: 'object' }, edgeTypes: { type: 'object' },
+        hasFileNodes: { type: 'boolean' }, hasDocumentNodes: { type: 'boolean' },
+        hasContainsEdges: { type: 'boolean' }, hasDocumentsEdges: { type: 'boolean' },
+        hasConfiguresEdges: { type: 'boolean' }, hasTestedEdges: { type: 'boolean' },
+      },
+      required: ['nodes', 'edges'],
+    }},
+  )
+  const uaGraphRaw = await agent(
+    `Read the understand-anything knowledge graph for deepseek-cli and summarize its structure.
+    Run: Bash("cat C:/Users/ziyu4/proj/harness_dev/bun_apps/deepseek-cli/.understand-anything/knowledge-graph.json | head -200")
+    Return: total nodes, edges, layers, tour steps, node types breakdown, edge types breakdown.`,
+    { label: 'graph-compare-ua', phase: 'Gap Analysis', model: 'haiku', schema: {
+      type: 'object',
+      properties: {
+        nodes: { type: 'number' }, edges: { type: 'number' },
+        layers: { type: 'number' }, tourSteps: { type: 'number' },
+        nodeTypes: { type: 'object' }, edgeTypes: { type: 'object' },
+        hasFileNodes: { type: 'boolean' }, hasDocumentNodes: { type: 'boolean' },
+        hasContainsEdges: { type: 'boolean' }, hasDocumentsEdges: { type: 'boolean' },
+        hasConfiguresEdges: { type: 'boolean' }, hasTestedEdges: { type: 'boolean' },
+      },
+      required: ['nodes', 'edges'],
+    }},
+  )
+  if (laGraphRaw && uaGraphRaw) {
+    graphComparisonContext = `
+## GRAPH QUALITY COMPARISON (deepseek-cli analysis)
+This comparison shows concrete quality gaps between what the bun-app produces vs what the UA plugin produces.
+The UA plugin analyzed the SAME project (deepseek-cli) and produced a richer graph.
+
+### .learning-anything (bun-app output):
+${JSON.stringify(laGraphRaw, null, 2)}
+
+### .understand-anything (UA plugin output — gold standard):
+${JSON.stringify(uaGraphRaw, null, 2)}
+
+### Key differences to address:
+- Node count: LA=${laGraphRaw.nodes} vs UA=${uaGraphRaw.nodes} (LA produces ${Math.round(laGraphRaw.nodes/uaGraphRaw.nodes*100)}% of UA's nodes)
+- Edge count: LA=${laGraphRaw.edges} vs UA=${uaGraphRaw.edges} (LA produces ${Math.round(laGraphRaw.edges/uaGraphRaw.edges*100)}% of UA's edges)
+- Layers: LA=${laGraphRaw.layers} vs UA=${uaGraphRaw.layers}
+- Tour steps: LA=${laGraphRaw.tourSteps} vs UA=${uaGraphRaw.tourSteps}
+- Missing node types in LA: file=${laGraphRaw.hasFileNodes ? 'yes' : 'NO'}, document=${laGraphRaw.hasDocumentNodes ? 'yes' : 'NO'}
+- Missing edge types in LA: contains=${laGraphRaw.hasContainsEdges ? 'yes' : 'NO'}, documents=${laGraphRaw.hasDocumentsEdges ? 'yes' : 'NO'}, configures=${laGraphRaw.hasConfiguresEdges ? 'yes' : 'NO'}, tested_by=${laGraphRaw.hasTestedEdges ? 'yes' : 'NO'}
+
+These gaps should be addressed by improving the bun-app's scan/analysis pipeline to produce
+richer node types (file, document, config), more edge types (contains, documents, configures, tested_by),
+better layer detection, and more informative tour generation.
+`
+  }
+} catch (e) {
+  log('Graph comparison: Could not read comparison graphs, skipping. ' + String(e).slice(0, 100))
+}
+} // end else (graphComparisonSkipped was false)
+
 const gapAnalysis = await agent(
   `Analyze the feature gap between Understand-Anything (UA) and the learning-anything bun-app.
 
@@ -653,6 +768,8 @@ const gapAnalysis = await agent(
 
   ## Previous Iteration Gap State
   ${previousIterationGaps ? JSON.stringify(previousIterationGaps, null, 2) : '(first run, no previous gaps)'}
+
+  ${graphComparisonContext}
 
   ## Bun-App Current Source Files
   Run: Bash("ls -la ${APP_DIR}/src/")
@@ -663,6 +780,8 @@ const gapAnalysis = await agent(
   - agent.ts: LLM agent with chat, chatStream, rootCauseAnalysis, analyzeArchitecture, designWorkflow
   - routes.ts: API endpoints for graph queries + agent calls
   - config.ts: DeepSeek V4 models, system prompts
+  - semantic-search.ts: cosine similarity search over pre-computed embeddings
+  - tour.ts: tour generation with heuristic topological sort
 
   ## What UA has that we want to port:
   1. context-builder.ts → buildChatContext() + formatContextForPrompt()
@@ -672,6 +791,14 @@ const gapAnalysis = await agent(
   5. staleness.ts → isStale() + getChangedFiles()
   6. Layer health scoring
   7. Path finding between nodes
+  8. Richer node types (file, document, config, service, endpoint) — see graph comparison above
+  9. Richer edge types (contains, documents, configures, tested_by) — see graph comparison above
+  10. Better layer detection (heuristic + LLM dual mode)
+  11. Better tour generation (more steps, language lessons)
+
+  ${graphComparisonSkipped ? `## GRAPH QUALITY COMPARISON SKIPPED
+  The graph quality comparison is unavailable because: ${graphSkipReason}.
+  Focus gap analysis on UA feature coverage only. Do not reference graph comparison data.` : ''}
 
   ## IMPORTANT: Diff-aware analysis instructions
   Instead of just grepping for function names, READ the actual bun-app source files to verify
@@ -685,6 +812,10 @@ const gapAnalysis = await agent(
   Bash("cat ${APP_DIR}/src/graph.ts | head -60")
   Bash("grep -l 'buildChatContext\\|buildExplainContext\\|buildDiffContext\\|buildOnboardingGuide' ${APP_DIR}/src/*.ts 2>/dev/null || echo 'none found'")
   Bash("grep -c 'getNodeByPath\\|getLayerHealth\\|getPathBetween\\|getHotspots\\|checkStaleness\\|semanticSearch\\|getSemanticSearchEngine' ${APP_DIR}/src/graph.ts 2>/dev/null || echo '0'")
+
+  IMPORTANT: Include the graph comparison gaps above as additional gap items. The bun-app's
+  scan/analysis pipeline must be improved to produce file-level nodes, document nodes, config nodes,
+  and edge types like contains, documents, configures, and tested_by.
 
   Return: gaps array (features NOT yet ported, with priority) and coverage stats.
   If all features are already ported, return empty gaps array with 100% coverage.`,
@@ -754,6 +885,7 @@ const CONVERGENCE_MAX_ZERO_GAP_CLOSURES = 3
 let stuckCounter = 0
 const STUCK_MAX = 2
 let converged = false
+let previousModifiedFiles = [] // tracks files modified in previous iteration for Reflect optimization
 let convergenceReason = ''
 let gapsClosedThisIteration = 0
 
@@ -900,12 +1032,15 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     Bash("cat ${APP_DIR}/src/layer-detector.ts")
     Bash("cat ${APP_DIR}/src/language-lesson.ts")
 
-    Always read the core modules that are likely targets for improvement:
+    ${previousModifiedFiles.length > 0 ? `## FILES CHANGED IN PREVIOUS ITERATION
+    The following files were modified in the previous iteration: ${previousModifiedFiles.join(', ')}.
+    Read ONLY these files plus any files directly relevant to identified gaps.
+    For unchanged files, trust the previous iteration's analysis — do NOT re-read them.` : `Always read the core modules that are likely targets for improvement:
     Bash("cat ${APP_DIR}/src/graph.ts")
     Bash("cat ${APP_DIR}/src/routes.ts")
     Bash("cat ${APP_DIR}/src/agent.ts")
     Bash("cat ${APP_DIR}/src/middleware.ts")
-    Bash("cat ${APP_DIR}/src/index.ts")
+    Bash("cat ${APP_DIR}/src/index.ts")`}
 
     Read additional source files ONLY if they are directly relevant to identified gaps.
     Do NOT blindly read all 13+ source files -- this wastes context window.
@@ -1251,6 +1386,9 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   log(`  Files modified: ${filesChanged.length > 0 ? filesChanged.join(', ') : '(none)'}`)
   log(`  Verdict: ${report?.overallVerdict || 'unknown'}`)
   log(`${'─'.repeat(60)}\n`)
+
+  // Track modified files for next iteration's Reflect optimization
+  previousModifiedFiles = actualChangedFiles.length > 0 ? actualChangedFiles : filesChanged
 
   // ─── Convergence gate (with gap-closure-aware diminishing returns detection) ───
   // Use verified changes from Diff Source phase instead of self-reported data
