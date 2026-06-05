@@ -22,6 +22,10 @@ bun run scripts/drawthings-bench.ts benchmark
 # DeepSeek CLI
 bun run bun_apps/deepseek-cli/src/index.ts --model pro <prompt>
 
+# Learning-Anything server (knowledge graph + LLM agent backend)
+UA_GRAPH_PATH=../Understand-Anything/.understand-anything/knowledge-graph.json bun run bun_apps/learning-anything/src/index.ts
+# Or set UA_PORT, UA_HOST, UA_DASHBOARD_URL as env vars
+
 # Launch Claude Code via alternative backends (source these, don't exec)
 source scripts/claude-code-deepseek.sh       # via DeepSeek API
 source scripts/claude-code-glm.sh            # via GLM/Z.AI API
@@ -39,6 +43,11 @@ source scripts/claude-code-origin.sh         # clean Anthropic env
 # Workflow({ name: 'demo-bun-image-self-improve' })
 # Workflow({ name: 'demo-bun-image-self-improve', args: { iterations: 3 } })
 # Metrics history persisted at: dist/demo-bun-image-metrics-history.json
+
+# Understand-Anything development workflow (learns from UA dashboard, self-improves)
+# Workflow({ name: 'learning-anything-develop-flow' })
+# Workflow({ name: 'learning-anything-develop-flow', args: { iterations: 3 } })
+# Metrics history persisted at: dist/understand-anything-metrics-history.json
 
 # Start SurrealDB
 ./scripts/run_surreal.sh
@@ -63,6 +72,7 @@ The root `package.json` declares `"workspaces": ["bun_apps/*"]`. Bun hoists all 
 
 Current workspace packages:
 - `bun_apps/deepseek-cli` — DeepSeek LLM CLI via Vercel AI SDK (`@ai-sdk/openai`, `ai`, `mathjs`, `zod`)
+- `bun_apps/learning-anything` — Bun web server backend for Claude Code workflows (Vercel AI SDK + DeepSeek models, knowledge graph API, LLM agent endpoints)
 - `bun_apps/hello-bun` — Minimal hello-world CLI (no dependencies)
 
 ### Provider abstraction pattern

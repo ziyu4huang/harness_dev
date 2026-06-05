@@ -1,0 +1,17 @@
+{
+  "name": "learning-anything",
+  "version": "0.1.0",
+  "description": "Bun web server backend for Claude Code dynamic workflows. Serves knowledge graph data with LLM-powered agent capabilities via DeepSeek models.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun src/index.ts",
+    "build": "mkdir -p _tmpout && bun build src/index.ts --outdir _tmpout --target bun --minify --sourcemap=external && cp _tmpout/index.js ../../dist/learning-anything-server.js && cp _tmpout/index.js.map ../../dist/learning-anything-server.js.map && rm -rf _tmpout",
+    "start": "bun dist/learning-anything-server.js",
+    "test": "bun test",
+    "audit": "bun scripts/audit.ts",
+    "quality-check": "bun scripts/quality-check.ts",
+    "benchmark": "bun scripts/benchmark.ts"
+  },
+  "dependencies": {}
+}

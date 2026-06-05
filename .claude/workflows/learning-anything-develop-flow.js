@@ -1,0 +1,1117 @@
+export const meta = {
+  name: 'learning-anything-develop-flow',
+  description: 'Self-improving development workflow that learns the Understand-Anything project via its dashboard, then develops bun_apps/learning-anything into a production Bun web server. Uses coding/self-reflection/root-cause-analysis to improve both the bun-app AND the workflow itself.',
+  whenToUse: 'Run to develop and iteratively improve the learning-anything bun web server. Each iteration: learn → audit → build → benchmark → reflect → improve → regression → report. Self-reflects to improve the workflow .js itself.',
+  phases: [
+    { title: 'Resolve', detail: 'Detect absolute project root path via git rev-parse' },
+    { title: 'Learn', detail: 'Query UA dashboard API + read UA plugin source files to catalog features' },
+    { title: 'Gap Analysis', detail: 'Compare UA features vs bun-app features, identify missing capabilities with priorities' },
+    { title: 'History', detail: 'Load metrics history from previous runs, display trend summary' },
+    { title: 'Audit', detail: 'Run bun-app audit script to inventory current state' },
+    { title: 'Build', detail: 'Build bundle using bun-app build script, run quality-check' },
+    { title: 'Benchmark', detail: 'Run bun-app benchmark script against bundled artifact' },
+    { title: 'Reflect', detail: 'Analyze results with Opus, plan improvements for bun-app AND workflow' },
+    { title: 'Improve', detail: 'Implement improvements to bun-app source, workflow .js, and scripts' },
+    { title: 'Regression', detail: 'Re-build, re-run quality-check + benchmark, verify no regressions' },
+    { title: 'Report', detail: 'Generate iteration report, persist to metrics history' },
+  ],
+}
+
+/*
+ * learning-anything-develop-flow workflow
+ *
+ * This workflow develops bun_apps/learning-anything into a production
+ * Bun web server by learning from the Understand-Anything project itself.
+ *
+ * Key innovation: The workflow queries the UA dashboard (knowledge graph API)
+ * to understand the project architecture, then uses that knowledge to guide
+ * development of the bun-app. It self-reflects to improve its own workflow.js.
+ *
+ * Architecture:
+ *   - Bun web server: serves knowledge graph data + LLM agent endpoints
+ *   - Vercel AI SDK: chat, streaming, structured output via DeepSeek models
+ *   - Knowledge graph: loaded from Understand-Anything plugin output
+ *
+ * Usage:
+ *   Workflow({ name: 'learning-anything-develop-flow' })
+ *   Workflow({ name: 'learning-anything-develop-flow', args: { iterations: 3 } })
+ *   Workflow({ name: 'learning-anything-develop-flow', args: { dashboardUrl: 'http://127.0.0.1:5174' } })
+ */
+
+// ─── Configuration ──────────────────────────────────────────────────────────
+
+const BUNDLE_NAME = 'learning-anything-server.js'
+const BUNDLE_MAP_NAME = 'learning-anything-server.js.map'
+const WORKFLOW_REL = '.claude/workflows/learning-anything-develop-flow.js'
+
+const DEFAULTS = {
+  iterations: 1,
+  targetBundleSizeKB: 80,
+  minTestPassRate: 0.8,
+  minFeatures: 10,
+  dashboardUrl: 'http://127.0.0.1:5174',
+  dashboardToken: '',
+}
+
+const config = { ...DEFAULTS, ...(args || {}) }
+
+// ─── Phase -1: Resolve absolute paths ────────────────────────────────────────
+
+phase('Resolve')
+
+const PATH_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectRoot: { type: 'string', description: 'Absolute path to the git project root' },
+  },
+  required: ['projectRoot'],
+}
+
+const pathResolution = await agent(
+  `Detect the absolute path of the git project root.
+  Run: Bash("git rev-parse --show-toplevel")
+  Return it as { projectRoot: "<the-path>" }.
+  Normalize backslashes to forward slashes.`,
+  { label: 'resolve-paths', phase: 'Resolve', model: 'haiku', schema: PATH_SCHEMA },
+)
+
+const PROJECT_ROOT = (pathResolution?.projectRoot || '').replace(/\\/g, '/')
+if (!PROJECT_ROOT) {
+  log('ERROR: Could not resolve project root.')
+}
+
+const APP_DIR = PROJECT_ROOT ? `${PROJECT_ROOT}/bun_apps/learning-anything` : 'bun_apps/learning-anything'
+const DIST_DIR = PROJECT_ROOT ? `${PROJECT_ROOT}/dist` : 'dist'
+const BUNDLE_PATH = `${DIST_DIR}/${BUNDLE_NAME}`
+const BUNDLE_MAP_PATH = `${DIST_DIR}/${BUNDLE_MAP_NAME}`
+const HISTORY_FILE = `${DIST_DIR}/learning-anything-metrics-history.json`
+const WORKFLOW_FILE = PROJECT_ROOT ? `${PROJECT_ROOT}/${WORKFLOW_REL}` : WORKFLOW_REL
+const WORKFLOW_SCRIPTS = [
+  `${APP_DIR}/scripts/audit.ts`,
+  `${APP_DIR}/scripts/quality-check.ts`,
+  `${APP_DIR}/scripts/benchmark.ts`,
+]
+
+log(`Resolved paths:`)
+log(`  PROJECT_ROOT: ${PROJECT_ROOT || '(fallback)'}`)
+log(`  APP_DIR:      ${APP_DIR}`)
+log(`  DIST_DIR:     ${DIST_DIR}`)
+log(`  BUNDLE_PATH:  ${BUNDLE_PATH}`)
+
+// ─── Phase 0: Learn from Understand-Anything dashboard ───────────────────────
+
+phase('Learn')
+
+const LEARN_SCHEMA = {
+  type: 'object',
+  properties: {
+    projectInfo: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        description: { type: 'string' },
+        languages: { type: 'array', items: { type: 'string' } },
+        frameworks: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    architecture: {
+      type: 'object',
+      properties: {
+        layers: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, nodeCount: { type: 'number' } } } },
+        totalNodes: { type: 'number' },
+        totalEdges: { type: 'number' },
+        nodeTypes: { type: 'object' },
+        edgeTypes: { type: 'object' },
+      },
+    },
+    keyModules: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          type: { type: 'string' },
+          summary: { type: 'string' },
+          connections: { type: 'number' },
+        },
+      },
+    },
+    tourSummary: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+    uaFeatures: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          sourceFile: { type: 'string' },
+          description: { type: 'string' },
+          exports: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+  },
+  required: ['projectInfo', 'architecture'],
+}
+
+const dashboardUrl = config.dashboardUrl.replace(/\/$/, '')
+const tokenQuery = config.dashboardToken ? `?token=${config.dashboardToken}` : ''
+
+// UA plugin source paths (for reading reference implementations)
+const UA_PLUGIN_SRC = 'C:/Users/ziyu4/.claude-glm/plugins/cache/understand-anything/understand-anything/2.7.6/src'
+const UA_PLUGIN_CORE = 'C:/Users/ziyu4/.claude-glm/plugins/cache/understand-anything/understand-anything/2.7.6/packages/core/src'
+
+const learned = await agent(
+  `Learn the Understand-Anything project by querying its knowledge graph dashboard API AND reading its source files.
+  The dashboard is running at ${dashboardUrl}.
+
+  Step 1: Get project stats:
+  Bash("curl -s '${dashboardUrl}/api/stats${tokenQuery}' 2>&1 || echo '{}'" )
+
+  Step 2: Get layers:
+  Bash("curl -s '${dashboardUrl}/api/layers${tokenQuery}' 2>&1 || echo '[]'")
+
+  Step 3: Get the guided tour:
+  Bash("curl -s '${dashboardUrl}/api/tour${tokenQuery}' 2>&1 || echo '[]'")
+
+  Step 4: Search for key modules (core, dashboard, plugin):
+  Bash("curl -s '${dashboardUrl}/api/search?q=core+engine&type=file${tokenQuery}' 2>&1 || echo '[]'")
+  Bash("curl -s '${dashboardUrl}/api/search?q=dashboard+component&type=file${tokenQuery}' 2>&1 || echo '[]'")
+  Bash("curl -s '${dashboardUrl}/api/search?q=agent+skill&type=file${tokenQuery}' 2>&1 || echo '[]'")
+
+  Step 5: Get the knowledge graph directly:
+  Bash("curl -s 'http://127.0.0.1:5174/knowledge-graph.json' 2>&1 | head -c 5000 || echo '{}'")
+
+  Step 6 (IMPORTANT): Read UA plugin source files to catalog ALL features that can be ported:
+  Bash("cat '${UA_PLUGIN_SRC}/context-builder.ts' 2>/dev/null | head -c 3000 || echo 'not found'")
+  Bash("cat '${UA_PLUGIN_SRC}/explain-builder.ts' 2>/dev/null | head -c 3000 || echo 'not found'")
+  Bash("cat '${UA_PLUGIN_SRC}/diff-analyzer.ts' 2>/dev/null | head -c 3000 || echo 'not found'")
+  Bash("cat '${UA_PLUGIN_SRC}/onboard-builder.ts' 2>/dev/null | head -c 3000 || echo 'not found'")
+  Bash("cat '${UA_PLUGIN_CORE}/staleness.ts' 2>/dev/null | head -c 2000 || echo 'not found'")
+
+  For each UA source file read, extract:
+  - The exported functions and their signatures
+  - What the function does (from comments and code)
+  - What types it depends on
+
+  Parse all responses and synthesize into a structured summary.
+  Include a "uaFeatures" array listing each UA feature that can be ported.
+
+  If the dashboard API is not available (connection refused), fall back to reading the knowledge graph file:
+  Bash("cat 'C:/Users/ziyu4/proj/Understand-Anything/.understand-anything/knowledge-graph.json' | head -c 10000")
+
+  Return the structured summary.`,
+  { label: 'learn-dashboard', phase: 'Learn', model: 'sonnet', schema: LEARN_SCHEMA },
+)
+
+const projInfo = learned?.projectInfo || {}
+const archInfo = learned?.architecture || {}
+const keyModules = learned?.keyModules || []
+const uaFeatures = learned?.uaFeatures || []
+
+log(`Learned: ${projInfo.name || 'understand-anything'}`)
+log(`  ${projInfo.description || 'No description'}`)
+log(`  ${archInfo.totalNodes || '?'} nodes, ${archInfo.totalEdges || '?'} edges`)
+log(`  Layers: ${(archInfo.layers || []).map((l) => l.name).join(', ')}`)
+log(`  Key modules: ${keyModules.slice(0, 5).map((m) => m.name).join(', ')}`)
+log(`  UA features cataloged: ${uaFeatures.length}`)
+
+// ─── Phase 0.5: Feature Gap Analysis ────────────────────────────────────────
+// Compare UA features against what the bun-app currently has, identify gaps.
+
+phase('Gap Analysis')
+
+const GAP_SCHEMA = {
+  type: 'object',
+  properties: {
+    gaps: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          feature: { type: 'string' },
+          uaSource: { type: 'string' },
+          priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+          effort: { type: 'string', enum: ['small', 'medium', 'large'] },
+          description: { type: 'string' },
+          approach: { type: 'string' },
+        },
+        required: ['feature', 'uaSource', 'priority', 'description'],
+      },
+    },
+    coverage: {
+      type: 'object',
+      properties: {
+        uaTotalFeatures: { type: 'number' },
+        bunAppCovered: { type: 'number' },
+        percentage: { type: 'number' },
+      },
+      required: ['uaTotalFeatures', 'bunAppCovered', 'percentage'],
+    },
+  },
+  required: ['gaps', 'coverage'],
+}
+
+const gapAnalysis = await agent(
+  `Analyze the feature gap between Understand-Anything (UA) and the learning-anything bun-app.
+
+  ## UA Features (from Learn phase)
+  ${JSON.stringify(uaFeatures, null, 2)}
+
+  ## Bun-App Current Source Files
+  Run: Bash("ls -la ${APP_DIR}/src/")
+  Run: Bash("cat ${APP_DIR}/src/routes.ts | grep -E '(GET|POST|api/)' | head -30")
+
+  ## What the bun-app already has (from previous implementations):
+  - graph.ts: GraphStore with node/edge search, neighborhood, dependency tree
+  - agent.ts: LLM agent with chat, chatStream, rootCauseAnalysis, analyzeArchitecture, designWorkflow
+  - routes.ts: API endpoints for graph queries + agent calls
+  - config.ts: DeepSeek V4 models, system prompts
+
+  ## What UA has that we want to port:
+  1. context-builder.ts → buildChatContext() + formatContextForPrompt()
+  2. explain-builder.ts → buildExplainContext() + formatExplainPrompt()
+  3. diff-analyzer.ts → buildDiffContext() + formatDiffAnalysis()
+  4. onboard-builder.ts → buildOnboardingGuide()
+  5. staleness.ts → isStale() + getChangedFiles()
+  6. Layer health scoring
+  7. Path finding between nodes
+
+  Read the bun-app source to check which features already exist:
+  Bash("grep -l 'buildChatContext\\|buildExplainContext\\|buildDiffContext\\|buildOnboardingGuide' ${APP_DIR}/src/*.ts 2>/dev/null || echo 'none found'")
+  Bash("grep -c 'getNodeByPath\\|getLayerHealth\\|getPathBetween\\|getHotspots\\|checkStaleness' ${APP_DIR}/src/graph.ts 2>/dev/null || echo '0'")
+
+  Return: gaps array (features NOT yet ported, with priority) and coverage stats.
+  If all features are already ported, return empty gaps array with 100% coverage.`,
+  { label: 'gap-analysis', phase: 'Gap Analysis', model: 'sonnet', schema: GAP_SCHEMA },
+)
+
+const gaps = gapAnalysis?.gaps || []
+const coverage = gapAnalysis?.coverage || { uaTotalFeatures: 15, bunAppCovered: 0, percentage: 0 }
+
+log(`Gap Analysis: ${gaps.length} gaps, ${coverage.percentage}% coverage`)
+if (gaps.length > 0) {
+  gaps.slice(0, 5).forEach((g, i) => {
+    log(`  ${i + 1}. [${g.priority}] ${g.feature} — ${g.description}`)
+  })
+} else {
+  log('  All UA features ported! 🎉')
+}
+
+// Store gap analysis for later phases
+const GAP_CONTEXT = JSON.stringify(gapAnalysis, null, 2)
+
+// Store learned context for later phases
+const LEARNED_CONTEXT = JSON.stringify(learned, null, 2)
+
+// ─── Schemas ─────────────────────────────────────────────────────────────────
+
+const HISTORY_SCHEMA = {
+  type: 'object',
+  properties: {
+    runs: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          iterations: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                iteration: { type: 'number' },
+                qualityScore: { type: 'number' },
+                bundleSizeKB: { type: 'number' },
+                testPassRate: { type: 'number' },
+                featureCount: { type: 'number' },
+                testCount: { type: 'number' },
+                testPassed: { type: 'number' },
+                improvementsApplied: { type: 'number' },
+                regressionsDetected: { type: 'number' },
+                verdict: { type: 'string' },
+                changesSummary: { type: 'string' },
+                workflowImprovements: { type: 'number' },
+              },
+              required: ['iteration', 'qualityScore', 'bundleSizeKB', 'testPassRate', 'featureCount'],
+            },
+          },
+        },
+        required: ['runId', 'iterations'],
+      },
+    },
+  },
+  required: ['runs'],
+}
+
+const QUALITY_CHECK_SCHEMA = {
+  type: 'object',
+  properties: {
+    overallPassed: { type: 'boolean' },
+    score: { type: 'number' },
+    gates: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          gate: { type: 'string' },
+          passed: { type: 'boolean' },
+          severity: { type: 'string' },
+          message: { type: 'string' },
+          detail: { type: 'string' },
+        },
+        required: ['gate', 'passed', 'severity', 'message'],
+      },
+    },
+    bundleSizeKB: { type: 'number' },
+    misplacedArtifacts: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['overallPassed', 'score', 'gates'],
+}
+
+const AUDIT_SCHEMA = {
+  type: 'object',
+  properties: {
+    features: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          type: { type: 'string' },
+          description: { type: 'string' },
+          file: { type: 'string' },
+        },
+        required: ['name', 'type', 'description'],
+      },
+    },
+    issues: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          file: { type: 'string' },
+          line: { type: 'number' },
+          type: { type: 'string' },
+          text: { type: 'string' },
+        },
+      },
+    },
+    health: {
+      type: 'object',
+      properties: {
+        undeclaredDeps: { type: 'array', items: { type: 'string' } },
+        unusedDeps: { type: 'array', items: { type: 'string' } },
+        deadExports: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    stats: {
+      type: 'object',
+      properties: {
+        codeLines: { type: 'number' },
+        testCases: { type: 'number' },
+        dependencyCount: { type: 'number' },
+        existingBundleSizeKB: { type: 'number' },
+        sourceFileCount: { type: 'number' },
+        scriptFileCount: { type: 'number' },
+      },
+    },
+  },
+  required: ['features', 'stats'],
+}
+
+const BENCHMARK_SCHEMA = {
+  type: 'object',
+  properties: {
+    totalTests: { type: 'number' },
+    passedTests: { type: 'number' },
+    failedTests: { type: 'number' },
+    totalLatencyMs: { type: 'number' },
+    results: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          category: { type: 'string' },
+          passed: { type: 'boolean' },
+          latencyMs: { type: 'number' },
+          failureReason: { type: 'string' },
+        },
+      },
+    },
+    featureInventory: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          feature: { type: 'string' },
+          status: { type: 'string' },
+          evidence: { type: 'string' },
+        },
+      },
+    },
+  },
+  required: ['totalTests', 'passedTests', 'failedTests', 'results'],
+}
+
+const REFLECTION_SCHEMA = {
+  type: 'object',
+  properties: {
+    bunAppImprovements: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          priority: { type: 'number' },
+          title: { type: 'string' },
+          description: { type: 'string' },
+          category: { type: 'string' },
+          effort: { type: 'string' },
+          impact: { type: 'string' },
+          approach: { type: 'string' },
+          filesToModify: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['priority', 'title', 'description', 'category', 'effort', 'impact', 'approach'],
+      },
+    },
+    workflowImprovements: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          description: { type: 'string' },
+          approach: { type: 'string' },
+        },
+        required: ['title', 'description', 'approach'],
+      },
+    },
+    scriptImprovements: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          script: { type: 'string' },
+          title: { type: 'string' },
+          description: { type: 'string' },
+          approach: { type: 'string' },
+        },
+        required: ['script', 'title', 'description', 'approach'],
+      },
+    },
+    strengths: { type: 'array', items: { type: 'string' } },
+    weaknesses: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['bunAppImprovements', 'workflowImprovements', 'strengths', 'weaknesses'],
+}
+
+const IMPROVEMENT_RESULT_SCHEMA = {
+  type: 'object',
+  properties: {
+    bunAppChanges: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          file: { type: 'string' },
+          change: { type: 'string' },
+          category: { type: 'string' },
+          status: { type: 'string', enum: ['applied', 'skipped', 'failed'] },
+        },
+        required: ['file', 'change', 'category', 'status'],
+      },
+    },
+    workflowChanges: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          change: { type: 'string' },
+          status: { type: 'string', enum: ['applied', 'skipped', 'failed'] },
+        },
+        required: ['change', 'status'],
+      },
+    },
+    scriptChanges: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          script: { type: 'string' },
+          change: { type: 'string' },
+          status: { type: 'string', enum: ['applied', 'skipped', 'failed'] },
+        },
+        required: ['script', 'change', 'status'],
+      },
+    },
+    testsAdded: { type: 'number' },
+    featuresAdded: { type: 'number' },
+    summary: { type: 'string' },
+  },
+  required: ['bunAppChanges', 'workflowChanges', 'testsAdded', 'featuresAdded', 'summary'],
+}
+
+const REPORT_SCHEMA = {
+  type: 'object',
+  properties: {
+    iteration: { type: 'number' },
+    qualityScore: {
+      type: 'object',
+      properties: {
+        before: { type: 'number' },
+        after: { type: 'number' },
+        delta: { type: 'number' },
+      },
+      required: ['before', 'after', 'delta'],
+    },
+    bundleSize: {
+      type: 'object',
+      properties: {
+        beforeKB: { type: 'number' },
+        afterKB: { type: 'number' },
+        deltaKB: { type: 'number' },
+      },
+    },
+    changesSummary: { type: 'string' },
+    improvementsApplied: { type: 'number' },
+    workflowImprovements: { type: 'number' },
+    regressionsDetected: { type: 'number' },
+    overallVerdict: { type: 'string', enum: ['significant-improvement', 'marginal-improvement', 'no-change', 'regressed', 'blocked'] },
+    nextSteps: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['iteration', 'qualityScore', 'changesSummary', 'improvementsApplied', 'regressionsDetected', 'overallVerdict'],
+}
+
+// ─── Helper: run bun-app script ─────────────────────────────────────────────
+
+async function runBunScript(scriptName, iteration, phaseName, schema) {
+  const label = `${scriptName}-${iteration}`
+  log(`[${iteration}] Running ${scriptName}...`)
+
+  const result = await agent(
+    `Run the bun-app script "${scriptName}" with --json and return its parsed output.
+
+    Run: Bash("cd ${APP_DIR} && bun run ${scriptName} --json 2>&1")
+
+    Parse the JSON and return it. If exit code 1, JSON is still valid — parse it.
+    Return ONLY the parsed JSON object.`,
+    { label, phase: phaseName, model: 'haiku', schema },
+  )
+
+  if (result && typeof result === 'object') return result
+
+  // Fallback
+  return await agent(
+    `Run the understand-thing bun-app's "${scriptName}" script.
+
+    Bash("cd ${APP_DIR} && bun run ${scriptName} 2>&1")
+
+    Parse JSON from output and return it.`,
+    { label: `${label}-fallback`, phase: phaseName, model: 'haiku', schema },
+  )
+}
+
+// ─── Phase 1: History ────────────────────────────────────────────────────────
+
+phase('History')
+
+const historyResult = await agent(
+  `Load the metrics history for learning-anything development.
+
+  Step 1: Ensure dist directory:
+  Bash("New-Item -ItemType Directory -Force -Path '${DIST_DIR}' | Out-Null")
+
+  Step 2: Read history:
+  Bash("if (Test-Path '${HISTORY_FILE}') { Get-Content '${HISTORY_FILE}' -Raw } else { '{ \"runs\": [] }' }")
+
+  Parse the JSON. Return { runs: [] } if invalid.`,
+  { label: 'load-history', phase: 'History', model: 'haiku', schema: HISTORY_SCHEMA },
+)
+
+const metricsHistory = historyResult || { runs: [] }
+const totalPreviousRuns = metricsHistory.runs.length
+const currentRunId = `run-${totalPreviousRuns + 1}`
+const allHistoricalRecords = metricsHistory.runs.flatMap(r => r.iterations)
+
+if (allHistoricalRecords.length > 0) {
+  const last = allHistoricalRecords[allHistoricalRecords.length - 1]
+  const first = allHistoricalRecords[0]
+  log(`History: ${totalPreviousRuns} runs, ${allHistoricalRecords.length} iterations`)
+  log(`  Quality: ${first.qualityScore} → ${last.qualityScore}`)
+  log(`  Bundle:  ${first.bundleSizeKB?.toFixed(1)} → ${last.bundleSizeKB?.toFixed(1)} KB`)
+} else {
+  log('History: No previous runs. Starting fresh.')
+}
+
+// ─── Iteration loop ──────────────────────────────────────────────────────────
+
+const MAX_ITERATIONS = Math.min(config.iterations, 5)
+let previousMetrics = allHistoricalRecords.length > 0
+  ? allHistoricalRecords[allHistoricalRecords.length - 1]
+  : null
+const runIterations = []
+
+let consecutiveLowDelta = 0
+const CONVERGENCE_DELTA_THRESHOLD = 2
+const CONVERGENCE_MAX_LOW_DELTAS = 2
+let converged = false
+let convergenceReason = ''
+
+for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+
+  log(`\n${'═'.repeat(60)}`)
+  log(`ITERATION ${iteration} of ${MAX_ITERATIONS}`)
+  log(`${'═'.repeat(60)}\n`)
+
+  // ====================================================================
+  // PHASE 2: Audit
+  // ====================================================================
+  phase('Audit')
+
+  log(`[${iteration}] Running audit...`)
+
+  const audit = await runBunScript('audit', iteration, 'Audit', AUDIT_SCHEMA)
+
+  const featureCount = audit?.features?.length || 0
+  const codeLines = audit?.stats?.codeLines || 0
+  const srcFiles = audit?.stats?.sourceFileCount || 0
+  log(`[${iteration}] Audit: ${featureCount} features, ${srcFiles} source files, ${codeLines} code lines`)
+
+  if (audit?.issues?.length > 0) {
+    log(`[${iteration}] Issues: ${audit.issues.map(i => `${i.type} ${i.file}:${i.line}`).join('; ')}`)
+  }
+
+  // ====================================================================
+  // PHASE 3: Build
+  // ====================================================================
+  phase('Build')
+
+  log(`[${iteration}] Building bundle...`)
+
+  const buildResult = await agent(
+    `Build the learning-anything-server bundle.
+
+    ⚠ CRITICAL: bun --outfile resolves relative to ENTRY FILE, not CWD.
+    You MUST cd into ${APP_DIR} first, then run bun run build.
+
+    Step 1: Ensure dist directory:
+    Bash("New-Item -ItemType Directory -Force -Path '${DIST_DIR}' | Out-Null")
+
+    Step 2: Build:
+    Bash("cd ${APP_DIR} && bun run build 2>&1")
+
+    Step 3: Verify:
+    Bash("if (Test-Path '${BUNDLE_PATH}') { (Get-Item '${BUNDLE_PATH}').Length / 1KB } else { 'MISSING' }")
+
+    Step 4: Run quality-check:
+    Bash("cd ${APP_DIR} && bun run quality-check 2>&1")
+
+    Return JSON: { success, bundleSizeKB, qualityScore }`,
+    { label: `build-${iteration}`, phase: 'Build', model: 'sonnet' },
+  )
+
+  let buildBundleKB = 0
+  try {
+    const buildJson = JSON.parse(buildResult || '{}')
+    buildBundleKB = buildJson.bundleSizeKB || 0
+  } catch {
+    const sizeMatch = (buildResult || '').match(/(\d+\.?\d*)\s*KB/)
+    if (sizeMatch) buildBundleKB = parseFloat(sizeMatch[1])
+  }
+  log(`[${iteration}] Build complete: ${buildBundleKB.toFixed(1)} KB`)
+
+  // ====================================================================
+  // PHASE 4: Benchmark
+  // ====================================================================
+  phase('Benchmark')
+
+  log(`[${iteration}] Running benchmark...`)
+
+  const benchmark = await runBunScript('benchmark', iteration, 'Benchmark', BENCHMARK_SCHEMA)
+
+  const passedTests = benchmark?.passedTests || 0
+  const totalTests = benchmark?.totalTests || 0
+  log(`[${iteration}] Benchmark: ${passedTests}/${totalTests} passed`)
+
+  // ====================================================================
+  // PHASE 5: Reflect (Opus)
+  // ====================================================================
+  phase('Reflect')
+
+  log(`[${iteration}] Self-reflecting (Opus)...`)
+
+  const reflection = await agent(
+    `You are a senior web server architect performing deep self-reflection on the learning-anything-server app
+    AND the development workflow that orchestrates it.
+
+    ## Learned from Understand-Anything Dashboard
+    ${LEARNED_CONTEXT}
+
+    ## Feature Gap Analysis
+    ${GAP_CONTEXT}
+
+    ## Coverage: ${coverage.percentage}% (${coverage.bunAppCovered}/${coverage.uaTotalFeatures} UA features ported)
+
+    ## Current Audit
+    Features: ${featureCount}, Source files: ${srcFiles}, Code: ${codeLines} lines
+    Bundle: ${buildBundleKB.toFixed(1)} KB
+
+    ## Benchmark Results
+    ${passedTests}/${totalTests} tests passed
+    Feature inventory: ${JSON.stringify(benchmark?.featureInventory || [])}
+
+    ## Previous Metrics
+    ${previousMetrics ? JSON.stringify(previousMetrics, null, 2) : '(first iteration)'}
+
+    ## App Architecture
+    The bun-app is a Bun web server at ${APP_DIR}:
+    - src/index.ts: HTTP server entry point (Bun.serve)
+    - src/config.ts: DeepSeek model definitions, env vars, system prompts
+    - src/graph.ts: Knowledge graph loader and query engine (GraphStore class)
+    - src/agent.ts: LLM agent via Vercel AI SDK (chat, root cause analysis, architecture analysis, workflow design, explainNode, analyzeDiff)
+    - src/routes.ts: API route handlers (REST endpoints for graph + agent)
+    - src/context.ts: Rich context builder (port of UA context-builder.ts)
+    - src/explain.ts: Node explanation builder (port of UA explain-builder.ts)
+    - src/diff.ts: Change impact analysis (port of UA diff-analyzer.ts)
+    - src/onboard.ts: Onboarding guide builder (port of UA onboard-builder.ts)
+
+    The server uses:
+    - Vercel AI SDK (ai, @ai-sdk/openai) for LLM calls
+    - DeepSeek models (pro, flash) via OpenAI-compatible API
+    - Bun native HTTP server (Bun.serve)
+    - zod for structured output validation
+
+    ## Your Task
+
+    Produce THREE categories of improvements:
+
+    1. **bunAppImprovements** (max 3): Improvements to the web server source code
+       - PRIORITY: If there are gaps from the gap analysis (${gaps.length} found), focus on porting those first
+       - Each must reference the UA source file to read: ${UA_PLUGIN_SRC}/*
+       - Each must have concrete approach, filesToModify, effort/impact rating
+       - Consider: better error handling, more endpoints, caching, middleware, logging
+       - Consider adding real tests (test file currently may not exist)
+       - Must not break existing functionality
+
+    2. **workflowImprovements** (max 2): Improvements to THIS workflow .js at ${WORKFLOW_FILE}
+       - Can the learning/gap analysis phases be improved?
+       - Are there missing quality gates?
+       - Can agent prompts be improved?
+       - Should the workflow learn differently from the dashboard?
+
+    3. **scriptImprovements** (max 2): Improvements to the bun-app's scripts
+       - audit.ts, quality-check.ts, benchmark.ts
+       - Better detection, more comprehensive checks
+
+    Also provide strengths and weaknesses of the current state.`,
+    { label: `reflect-${iteration}`, phase: 'Reflect', model: 'opus', schema: REFLECTION_SCHEMA },
+  )
+
+  const bunAppPlanCount = reflection?.bunAppImprovements?.length || 0
+  const workflowPlanCount = reflection?.workflowImprovements?.length || 0
+  const scriptPlanCount = reflection?.scriptImprovements?.length || 0
+  log(`[${iteration}] Reflection: ${bunAppPlanCount} app + ${workflowPlanCount} workflow + ${scriptPlanCount} script improvements`)
+
+  if (reflection?.bunAppImprovements?.length) {
+    reflection.bunAppImprovements.slice(0, 3).forEach((item, i) => {
+      log(`  ${i + 1}. [${item.category}] ${item.title} (${item.effort} effort, ${item.impact} impact)`)
+    })
+  }
+  if (reflection?.workflowImprovements?.length) {
+    log(`  Workflow: ${reflection.workflowImprovements.map(w => w.title).join(', ')}`)
+  }
+
+  // ─── Early-exit gate ─────────────────────────────────────────────────────
+  const noImprovements = !reflection?.bunAppImprovements?.length
+    && !reflection?.workflowImprovements?.length
+    && !reflection?.scriptImprovements?.length
+
+  if (noImprovements) {
+    log(`[${iteration}] No improvements planned. Skipping Improve phase.`)
+    phase('Report')
+
+    const report = await agent(
+      `Generate summary for iteration ${iteration} with no changes.
+      Quality score: ${previousMetrics?.qualityScore || 0}/100
+      Bundle: ${buildBundleKB.toFixed(1)} KB
+      Tests: ${passedTests}/${totalTests}
+      No improvements applied.
+      Return: qualityScore delta 0, verdict "no-change", 3-5 next steps.`,
+      { label: `report-${iteration}`, phase: 'Report', model: 'haiku', schema: REPORT_SCHEMA },
+    )
+
+    const iterationRecord = {
+      iteration,
+      qualityScore: report?.qualityScore?.after || 0,
+      bundleSizeKB: buildBundleKB,
+      testPassRate: totalTests > 0 ? passedTests / totalTests : 0,
+      featureCount,
+      testCount: totalTests,
+      testPassed: passedTests,
+      improvementsApplied: 0,
+      regressionsDetected: 0,
+      verdict: 'no-change',
+      changesSummary: 'No improvements planned.',
+      workflowImprovements: 0,
+    }
+    previousMetrics = iterationRecord
+    runIterations.push(iterationRecord)
+    continue
+  }
+
+  // ====================================================================
+  // PHASE 6: Improve
+  // ====================================================================
+  phase('Improve')
+
+  log(`[${iteration}] Implementing improvements...`)
+
+  const improvements = await agent(
+    `Implement improvements to BOTH the learning-anything-server bun-app AND the development workflow.
+
+    ## Bun-App Improvement Plan
+    ${JSON.stringify(reflection?.bunAppImprovements || [], null, 2)}
+
+    ## Workflow Improvement Plan
+    ${JSON.stringify(reflection?.workflowImprovements || [], null, 2)}
+
+    ## Script Improvement Plan
+    ${JSON.stringify(reflection?.scriptImprovements || [], null, 2)}
+
+    ## Feature Gap Analysis (DIRECTED PORTING)
+    ${GAP_CONTEXT}
+
+    ## UA Reference Implementations
+    When porting UA features, READ the UA source files FIRST to understand the implementation:
+    - Context builder: ${UA_PLUGIN_SRC}/context-builder.ts
+    - Explain builder: ${UA_PLUGIN_SRC}/explain-builder.ts
+    - Diff analyzer: ${UA_PLUGIN_SRC}/diff-analyzer.ts
+    - Onboarding: ${UA_PLUGIN_SRC}/onboard-builder.ts
+    - Staleness: ${UA_PLUGIN_CORE}/staleness.ts
+
+    ## Porting Rules
+    1. Read the UA source FIRST before writing any bun-app code
+    2. Port the LOGIC, not the imports (UA uses @understand-anything/core, bun-app uses graph.ts)
+    3. Keep the bun-app self-contained — no dependency on UA
+    4. Maintain pure Bun + Vercel AI SDK — no Express/Koa
+    5. Each ported feature gets a new API endpoint in routes.ts
+    6. Each ported feature's logic goes in the appropriate module
+
+    ## Files
+    Bun-app source:
+    - ${APP_DIR}/src/index.ts (server entry)
+    - ${APP_DIR}/src/config.ts (models, env, prompts)
+    - ${APP_DIR}/src/graph.ts (knowledge graph store)
+    - ${APP_DIR}/src/agent.ts (LLM agent via Vercel AI SDK)
+    - ${APP_DIR}/src/routes.ts (API route handlers)
+    - ${APP_DIR}/src/context.ts (rich context builder)
+    - ${APP_DIR}/src/explain.ts (node explanation builder)
+    - ${APP_DIR}/src/diff.ts (change impact analysis)
+    - ${APP_DIR}/src/onboard.ts (onboarding guide builder)
+
+    Bun-app scripts:
+    - ${APP_DIR}/scripts/audit.ts
+    - ${APP_DIR}/scripts/quality-check.ts
+    - ${APP_DIR}/scripts/benchmark.ts
+
+    Bun-app config:
+    - ${APP_DIR}/package.json
+
+    Workflow:
+    - ${WORKFLOW_FILE}
+
+    ## Implementation Rules
+
+    ### For bun-app changes:
+    1. Read the current source files FIRST
+    2. Apply improvements incrementally
+    3. After ALL changes, verify TypeScript parses: Bash("cd ${APP_DIR} && bun build --no-bundle src/index.ts 2>&1")
+    4. If any test files exist, run them: Bash("cd ${APP_DIR} && bun test 2>&1")
+
+    ### For workflow changes:
+    1. Read ${WORKFLOW_FILE} FIRST
+    2. Apply improvements carefully
+    3. Do NOT break existing phase structure or schemas
+
+    ### For script changes:
+    1. Read the current script FIRST
+    2. Apply improvements
+    3. Test: Bash("cd ${APP_DIR} && bun run <script-name> 2>&1")
+
+    ## SCOPE GUARD — CRITICAL
+    You MUST ONLY modify files listed in the "Files" section above.
+    NEVER modify files outside ${APP_DIR}/ or ${WORKFLOW_FILE}.
+    Do NOT touch: bun_apps/deepseek-cli/*, bun_apps/demo-bun-image/*, scripts/*, docs/*, or any other file.
+
+    Record all changes applied for bun-app, workflow, and scripts separately.`,
+    { label: `improve-${iteration}`, phase: 'Improve', model: 'sonnet', schema: IMPROVEMENT_RESULT_SCHEMA },
+  )
+
+  const bunAppChanges = improvements?.bunAppChanges?.length || 0
+  const workflowChanges = improvements?.workflowChanges?.length || 0
+  const scriptChanges = improvements?.scriptChanges?.length || 0
+  log(`[${iteration}] Improvements: ${bunAppChanges} app + ${workflowChanges} workflow + ${scriptChanges} script changes`)
+
+  // ====================================================================
+  // PHASE 7: Regression
+  // ====================================================================
+  phase('Regression')
+
+  log(`[${iteration}] Running regression checks...`)
+
+  const regression = await agent(
+    `Run regression tests after improvements.
+
+    ⚠ CRITICAL: cd into ${APP_DIR} before building.
+
+    Step 1: Re-build
+    Bash("cd ${APP_DIR} && bun run build 2>&1")
+
+    Step 2: Quality check
+    Bash("cd ${APP_DIR} && bun run quality-check --json 2>&1")
+
+    Step 3: Benchmark
+    Bash("cd ${APP_DIR} && bun run benchmark --json 2>&1")
+
+    Step 4: Compare to previous metrics
+    Previous: Bundle ${buildBundleKB.toFixed(1)} KB, Tests ${passedTests}/${totalTests}
+
+    Return JSON: { overallPassed, previousBundleSizeKB, newBundleSizeKB, bundleSizeDeltaKB, qualityScore, benchmarkPassed, benchmarkTotal, regressionCount, regressions: [], verdict }`,
+    { label: `regression-${iteration}`, phase: 'Regression', model: 'sonnet' },
+  )
+
+  let regressionData = {}
+  try { regressionData = JSON.parse(regression || '{}') } catch {}
+
+  const prevKB = regressionData.previousBundleSizeKB || buildBundleKB
+  const newKB = regressionData.newBundleSizeKB || buildBundleKB
+  const deltaKB = regressionData.bundleSizeDeltaKB || (newKB - prevKB)
+  const regressionVerdict = regressionData.verdict || 'unknown'
+  const regressionCount = regressionData.regressionCount || 0
+  const qualityScoreAfter = regressionData.qualityScore || 0
+
+  log(`[${iteration}] Regression: ${regressionVerdict} — ${prevKB.toFixed(1)} → ${newKB.toFixed(1)} KB (${deltaKB >= 0 ? '+' : ''}${deltaKB.toFixed(1)})`)
+
+  if (regressionCount > 0) {
+    log(`[${iteration}] WARNING: ${regressionCount} regressions!`)
+  }
+
+  // ====================================================================
+  // PHASE 8: Report
+  // ====================================================================
+  phase('Report')
+
+  log(`[${iteration}] Generating report...`)
+
+  const report = await agent(
+    `Generate summary report for iteration ${iteration}.
+
+    Quality: ${qualityScoreAfter}/100
+    Bundle: ${prevKB.toFixed(1)} → ${newKB.toFixed(1)} KB
+    Improvements: ${bunAppChanges} app + ${workflowChanges} workflow
+    Regression verdict: ${regressionVerdict}, count: ${regressionCount}
+    Previous: ${previousMetrics ? JSON.stringify(previousMetrics) : '(first)'}
+
+    Return: qualityScore { before, after, delta }, changesSummary, improvementsApplied, workflowImprovements, regressionsDetected, overallVerdict, nextSteps.`,
+    { label: `report-${iteration}`, phase: 'Report', model: 'haiku', schema: REPORT_SCHEMA },
+  )
+
+  const iterationRecord = {
+    iteration,
+    qualityScore: report?.qualityScore?.after || qualityScoreAfter,
+    bundleSizeKB: newKB || buildBundleKB,
+    testPassRate: totalTests > 0 ? passedTests / totalTests : 0,
+    featureCount,
+    testCount: totalTests,
+    testPassed: passedTests,
+    improvementsApplied: bunAppChanges,
+    regressionsDetected: regressionCount,
+    verdict: report?.overallVerdict || 'unknown',
+    changesSummary: improvements?.summary || '',
+    workflowImprovements: workflowChanges,
+  }
+  previousMetrics = iterationRecord
+  runIterations.push(iterationRecord)
+
+  log(`\n${'─'.repeat(60)}`)
+  log(`ITERATION ${iteration} COMPLETE`)
+  log(`  Quality: ${report?.qualityScore?.before || '?'} → ${report?.qualityScore?.after || '?'} (Δ${report?.qualityScore?.delta >= 0 ? '+' : ''}${report?.qualityScore?.delta || '?'})`)
+  log(`  Bundle:  ${report?.bundleSize?.beforeKB?.toFixed(1) || '?'} → ${report?.bundleSize?.afterKB?.toFixed(1) || '?'} KB`)
+  log(`  App: ${bunAppChanges} changes, Workflow: ${workflowChanges} changes`)
+  log(`  Verdict: ${report?.overallVerdict || 'unknown'}`)
+  log(`${'─'.repeat(60)}\n`)
+
+  // ─── Convergence gate ──────────────────────────────────────────────────
+  const totalChanges = bunAppChanges + workflowChanges + scriptChanges
+  const qualityDelta = Math.abs(report?.qualityScore?.delta || 0)
+
+  if (totalChanges === 0) {
+    consecutiveLowDelta++
+    if (consecutiveLowDelta >= CONVERGENCE_MAX_LOW_DELTAS) {
+      converged = true
+      convergenceReason = `No changes for ${consecutiveLowDelta} consecutive iterations`
+    }
+  } else if (qualityDelta < CONVERGENCE_DELTA_THRESHOLD) {
+    consecutiveLowDelta++
+    if (consecutiveLowDelta >= CONVERGENCE_MAX_LOW_DELTAS) {
+      converged = true
+      convergenceReason = `Quality delta < ${CONVERGENCE_DELTA_THRESHOLD} for ${consecutiveLowDelta} iterations`
+    }
+  } else {
+    consecutiveLowDelta = 0
+  }
+
+  if (converged) {
+    log(`\nCONVERGENCE — stopping at iteration ${iteration}`)
+    log(`  Reason: ${convergenceReason}`)
+    break
+  }
+}
+
+// ─── Persist history ──────────────────────────────────────────────────────────
+
+metricsHistory.runs.push({ runId: currentRunId, iterations: runIterations })
+
+await agent(
+  `Persist metrics history.
+  Write to ${HISTORY_FILE}:
+  ${JSON.stringify(metricsHistory, null, 2)}
+  Use Write tool. Return "ok".`,
+  { label: 'save-history', model: 'haiku' },
+)
+
+log(`History saved to ${HISTORY_FILE}`)
+
+// ─── Final summary ────────────────────────────────────────────────────────────
+
+log(`\n${'═'.repeat(60)}`)
+log(`ALL ITERATIONS COMPLETE`)
+log(`${'═'.repeat(60)}`)
+
+if (previousMetrics) {
+  log(`Final bundle: ${previousMetrics.bundleSizeKB?.toFixed(1) || '?'} KB`)
+  log(`Final quality: ${previousMetrics.qualityScore || '?'}/100`)
+  log(`Features: ${previousMetrics.featureCount || '?'}`)
+}
+
+// ─── History trend table ─────────────────────────────────────────────────────
+
+const allRecords = metricsHistory.runs.flatMap(r =>
+  r.iterations.map(it => ({ runId: r.runId, ...it }))
+)
+
+if (allRecords.length > 0) {
+  log(`\nMETRICS HISTORY (${allRecords.length} data points)`)
+  log(`${'─'.repeat(60)}`)
+
+  for (const r of allRecords) {
+    const bar = '█'.repeat(Math.round((r.qualityScore / 100) * 20)) + '░'.repeat(20 - Math.round((r.qualityScore / 100) * 20))
+    log(`  ${r.runId} #${r.iteration}: ${bar} ${r.qualityScore} | ${r.bundleSizeKB?.toFixed(1)}KB | ${r.verdict}`)
+  }
+}
+
+log(`\nWorkflow complete. Bundle: ${BUNDLE_PATH}`)
+log(`Metrics: ${HISTORY_FILE}`)
