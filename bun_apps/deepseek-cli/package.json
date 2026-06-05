@@ -8,9 +8,12 @@
     "deepseek-cli": "src/index.ts"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir ../../dist --target bun --minify --sourcemap=external && cd ../../dist && mv index.js deepseek-cli.js && mv index.js.map deepseek-cli.js.map",
+    "build": "bun build src/index.ts --outfile ../../dist/deepseek-cli.js --target bun --minify --sourcemap && bun -e \"import{existsSync,unlinkSync}from'fs';import{join}from'path';for(const f of['src/deepseek-cli.js','src/deepseek-cli.js.map'].map(p=>join(import.meta.dir,p)))if(existsSync(f))unlinkSync(f)\"",
     "start": "bun src/index.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "audit": "bun scripts/audit.ts --json",
+    "quality-check": "bun scripts/quality-check.ts --json",
+    "benchmark": "bun scripts/benchmark.ts --json"
   },
   "dependencies": {}
 }
