@@ -169,6 +169,10 @@ function audit(): AuditReport {
     "search-ignore-filtering",     // routes.ts search with ignored parameter
     "request-logging",             // middleware.ts requestLogger
     "error-classification",        // middleware.ts classifyError
+    // Phase 3 features (new ports)
+    "graph-persistence",           // graph.ts save() + mergeGraphUpdate()
+    "tour-generation",             // tour.ts generateHeuristicTour()
+    "expanded-node-types",         // validate.ts 21 UA node types
   ];
 
   const portedFeatures: string[] = [];
@@ -193,6 +197,7 @@ function audit(): AuditReport {
       "search-ignore-filtering": "routes",
       "request-logging": "middleware",
       "error-classification": "middleware",
+      "tour-generation": "tour",
     };
     const requiredModule = moduleMap[feat];
     if (requiredModule) {
@@ -217,6 +222,8 @@ function audit(): AuditReport {
         "request-logging": "requestLogger",
         "error-classification": "classifyError",
         "search-ignore-filtering": "createIgnoreFilter",
+        "graph-persistence": "save",
+        "expanded-node-types": "domain",
       };
       const pattern = fnPatterns[feat];
       if (pattern) {

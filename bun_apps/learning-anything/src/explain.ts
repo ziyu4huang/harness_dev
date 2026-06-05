@@ -49,6 +49,11 @@ export function buildExplainContext(
     targetNode = graphStore.getNodeByPath(path) ?? null;
   }
 
+  // Fall back to exact node ID match (for nodes without file paths like domain, concept, etc.)
+  if (!targetNode) {
+    targetNode = graphStore.getNode(path) ?? null;
+  }
+
   if (!targetNode) {
     return {
       projectName: graph.project.name,
@@ -174,6 +179,44 @@ export function formatExplainPrompt(ctx: ExplainContext): string {
   if (targetNode.languageNotes) {
     lines.push("## Language Notes");
     lines.push(targetNode.languageNotes);
+    lines.push("");
+  }
+
+  if (targetNode.domainMeta) {
+    const dm = targetNode.domainMeta;
+    lines.push("## Domain Context");
+    lines.push(`**Entities:** ${dm.entities.join(", ")}`);
+    if (dm.businessRules?.length) {
+      lines.push("**Business Rules:**");
+      for (const rule of dm.businessRules) {
+        lines.push(`- ${rule}`);
+      }
+    }
+    if (dm.crossDomainInteractions?.length) {
+      lines.push("**Cross-Domain Interactions:**");
+      for (const interaction of dm.crossDomainInteractions) {
+        lines.push(`- ${interaction}`);
+      }
+    }
+    if (dm.entryPoints?.length) {
+      lines.push(`**Entry Points:** ${dm.entryPoints.join(", ")}`);
+    }
+    lines.push("");
+  }
+
+  if (targetNode.knowledgeMeta) {
+    const km = targetNode.knowledgeMeta;
+    lines.push("## Knowledge Sources");
+    if (km.authors?.length) lines.push(`**Authors:** ${km.authors.join(", ")}`);
+    if (km.publishedDate) lines.push(`**Published:** ${km.publishedDate}`);
+    if (km.source) lines.push(`**Source:** ${km.source}`);
+    if (km.citations?.length) {
+      lines.push("**Citations:**");
+      for (const cite of km.citations) {
+        lines.push(`- ${cite}`);
+      }
+    }
+    if (km.relatedTopics?.length) lines.push(`**Related Topics:** ${km.relatedTopics.join(", ")}`);
     lines.push("");
   }
 

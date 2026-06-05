@@ -24,6 +24,8 @@ import { buildChatContext, formatContextForPrompt } from "./context.js";
 import { buildExplainContext, formatExplainPrompt } from "./explain.js";
 import { buildDiffContext, formatDiffAnalysis } from "./diff.js";
 import { buildOnboardingGuide } from "./onboard.js";
+import { buildLayerDetectionPrompt, parseLayerDetectionResponse, type LLMLayerResponse } from "./layer-detector.js";
+import { buildLanguageLessonPrompt, parseLanguageLessonResponse, type LanguageLessonResult } from "./language-lesson.js";
 import {
   buildFileAnalysisPrompt,
   buildProjectSummaryPrompt,
@@ -523,4 +525,73 @@ export async function summarizeProject(
     } : undefined,
   };
 }
+
+/**
+ * Detect architectural layers using LLM -- uses pro model for analysis.
+ * Sends file paths to the LLM and asks it to classify them into layers.
+ * Returns the LLM-provided layer definitions.
+ */
+export async function detectLayersLLM(
+  graphStore: GraphStore,
+  modelKey: string = "pro",
+): Promise<LLMLayerResponse[]> {
+  const modelId = resolveModelId(modelKey);
+  const model = provider()(modelId);
+  const params = getModelParams(modelKey);
+
+  const nodes = graphStore.getNodes();
+  const prompt = buildLayerDetectionPrompt(nodes);
+
+  const result = await generateText({
+    model,
+    system: SYSTEM_PROMPTS.graphAnalyst,
+    prompt,
+    maxTokens: params.maxTokens,
+    temperature: Math.min(params.temperature, 0.3),
+  });
+
+  return parseLayerDetectionResponse(result.text) ?? [];
+}
+
+/**
+ * Generate a language lesson for a specific node -- uses pro model.
+ * Detects language concepts and asks the LLM to explain them.
+ */
+export async function generateLanguageLesson(
+  nodeId: string,
+  graphStore: GraphStore,
+  language: string = "TypeScript",
+  modelKey: string = "pro",
+): Promise<LanguageLessonResult & { nodeId: string; conceptsDetected: string[] }> {
+  const modelId = resolveModelId(modelKey);
+  const model = provider()(modelId);
+  const params = getModelParams(modelKey);
+
+  const node = graphStore.getNode(nodeId);
+  if (!node) {
+    return { languageNotes: "Node not found.", concepts: [], nodeId, conceptsDetected: [] };
+  }
+
+  const edges = graphStore.getEdgesForNode(nodeId);
+  const conceptsDetected = detectLanguageConcepts(node);
+  const prompt = buildLanguageLessonPrompt(node, edges, language);
+
+  const result = await generateText({
+    model,
+    system: SYSTEM_PROMPTS.explainAnalyst,
+    prompt,
+    maxTokens: params.maxTokens,
+    temperature: Math.min(params.temperature, 0.3),
+  });
+
+  const lesson = parseLanguageLessonResponse(result.text);
+  return {
+    ...lesson,
+    nodeId,
+    conceptsDetected,
+  };
+}
+
+// Re-export detectLanguageConcepts for convenience
+import { detectLanguageConcepts } from "./language-lesson.js";
 

@@ -115,6 +115,16 @@ async function check(): Promise<QualityReport> {
     "src/explain.ts",
     "src/diff.ts",
     "src/onboard.ts",
+    "src/validate.ts",
+    "src/search.ts",
+    "src/analyzer.ts",
+    "src/ignore.ts",
+    "src/middleware.ts",
+    "src/tour.ts",
+    "src/fingerprint.ts",
+    "src/change-classifier.ts",
+    "src/layer-detector.ts",
+    "src/language-lesson.ts",
   ];
   const missingSrc = expectedFiles.filter(f => !existsSync(join(ROOT, f)));
   gates.push({
@@ -221,6 +231,153 @@ async function check(): Promise<QualityReport> {
     detail: undeclaredDeps.join(", "),
   });
   if (!undeclaredPass) score -= 10;
+
+  // Gate 11: TypeScript compilation check
+  let tsCompiles = false;
+  try {
+    const proc = Bun.spawnSync(
+      ["bun", "build", "--no-bundle", join(ROOT, "src", "index.ts")],
+      { cwd: ROOT, encoding: "utf-8", stderr: "pipe" },
+    );
+    tsCompiles = proc.exitCode === 0;
+  } catch {
+    tsCompiles = false;
+  }
+  gates.push({
+    gate: "typescript-compiles",
+    passed: tsCompiles,
+    severity: "critical",
+    message: tsCompiles
+      ? "TypeScript compilation succeeds"
+      : "TypeScript compilation failed — run `bun build --no-bundle src/index.ts` for details",
+  });
+  if (!tsCompiles) score -= 10;
+
+  // Gate 12: Function complexity — flag exported functions longer than 80 lines
+  const FUNCTION_RE = /(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{/g;
+  const oversizedFunctions: string[] = [];
+  if (existsSync(srcDir)) {
+    const srcFilesForComplexity = readdirSync(srcDir)
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts"))
+      .map((f) => join(srcDir, f));
+
+    for (const file of srcFilesForComplexity) {
+      const content = readFileSync(file, "utf-8");
+      const lines = content.split("\n");
+      let fm: RegExpExecArray | null;
+      FUNCTION_RE.lastIndex = 0;
+      while ((fm = FUNCTION_RE.exec(content)) !== null) {
+        const fnName = fm[1];
+        const startLine = content.substring(0, fm.index).split("\n").length - 1;
+        let depth = 0;
+        let foundOpen = false;
+        let endLine = startLine;
+        for (let i = startLine; i < lines.length; i++) {
+          for (const ch of lines[i]) {
+            if (ch === "{") { depth++; foundOpen = true; }
+            if (ch === "}") depth--;
+          }
+          if (foundOpen && depth <= 0) { endLine = i; break; }
+        }
+        const lineCount = endLine - startLine + 1;
+        if (lineCount > 80) {
+          const basename = file.split(/[/\\]/).pop() ?? file;
+          oversizedFunctions.push(`${basename}:${fnName} (${lineCount} lines)`);
+        }
+      }
+    }
+  }
+  const complexityPass = oversizedFunctions.length === 0;
+  gates.push({
+    gate: "function-complexity",
+    passed: complexityPass,
+    severity: "warning",
+    message: complexityPass
+      ? "No exported functions exceed 80 lines"
+      : `${oversizedFunctions.length} function(s) exceed 80 lines: ${oversizedFunctions.slice(0, 5).join(", ")}`,
+    detail: oversizedFunctions.join(", "),
+  });
+  score -= oversizedFunctions.length * 5;
+
+  // Gate 13: TODO/FIXME/HACK accumulation tracking
+  const TODO_RE = /\/\/\s*(TODO|FIXME|HACK)\b/gi;
+  const todoItems: string[] = [];
+  if (existsSync(srcDir)) {
+    const srcFilesForTodos = readdirSync(srcDir)
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts"))
+      .map((f) => join(srcDir, f));
+
+    for (const file of srcFilesForTodos) {
+      const content = readFileSync(file, "utf-8");
+      const fileLines = content.split("\n");
+      let tm: RegExpExecArray | null;
+      TODO_RE.lastIndex = 0;
+      while ((tm = TODO_RE.exec(content)) !== null) {
+        const lineNum = content.substring(0, tm.index).split("\n").length;
+        const basename = file.split(/[/\\]/).pop() ?? file;
+        todoItems.push(`${basename}:${lineNum}: ${tm[0].trim()}`);
+      }
+    }
+  }
+  const todoCount = todoItems.length;
+  const todoSeverity: "critical" | "warning" | "info" = todoCount > 20 ? "critical" : todoCount > 10 ? "warning" : "info";
+  const todoPass = todoCount <= 10;
+  gates.push({
+    gate: "todo-accumulation",
+    passed: todoPass,
+    severity: todoSeverity,
+    message: todoPass
+      ? `TODO/FIXME/HACK count is manageable: ${todoCount}`
+      : `High TODO/FIXME/HACK count: ${todoCount} (threshold: 10 warning, 20 critical)`,
+    detail: todoItems.slice(0, 10).join("\n"),
+  });
+  if (todoCount > 10) score -= (todoCount - 10) * 2;
+
+  // Gate 14: Test coverage estimate (exports vs test count ratio)
+  const EXPORT_RE = /(?:export\s+(?:default\s+)?(?:function|class|const|let|var|interface|type|enum)\s+(\w+))/g;
+  const exportedSymbols = new Set<string>();
+  if (existsSync(srcDir)) {
+    const srcFilesForExports = readdirSync(srcDir)
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts"))
+      .map((f) => join(srcDir, f));
+
+    for (const file of srcFilesForExports) {
+      const content = readFileSync(file, "utf-8");
+      let em: RegExpExecArray | null;
+      EXPORT_RE.lastIndex = 0;
+      while ((em = EXPORT_RE.exec(content)) !== null) {
+        exportedSymbols.add(em[1]);
+      }
+    }
+  }
+
+  const testDir = join(ROOT, "src", "__tests__");
+  let testCount = 0;
+  if (existsSync(testDir)) {
+    const testFiles = readdirSync(testDir, { recursive: true })
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts"))
+      .map((f) => join(testDir, f));
+
+    for (const file of testFiles) {
+      const content = readFileSync(file, "utf-8");
+      const matches = content.match(/\btest\s*\(/g);
+      testCount += matches ? matches.length : 0;
+    }
+  }
+
+  const exportCount = exportedSymbols.size;
+  const coverageRatio = exportCount > 0 ? testCount / exportCount : 0;
+  const coveragePass = coverageRatio >= 0.2 || exportCount === 0;
+  gates.push({
+    gate: "test-coverage-estimate",
+    passed: coveragePass,
+    severity: "warning",
+    message: coveragePass
+      ? `Test coverage estimate: ${testCount} tests for ${exportCount} exports (ratio: ${coverageRatio.toFixed(2)})`
+      : `Low test coverage: ${testCount} tests for ${exportCount} exports (ratio: ${coverageRatio.toFixed(2)}, target >= 0.20)`,
+    detail: `Exports: ${[...exportedSymbols].slice(0, 20).join(", ")}`,
+  });
+  if (!coveragePass) score -= 10;
 
   const overallPassed = score >= 60 && !gates.some(g => g.severity === "critical" && !g.passed);
 

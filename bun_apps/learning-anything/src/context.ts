@@ -7,7 +7,7 @@
  */
 
 import type { GraphStore } from "./graph.js";
-import type { GraphNode, GraphEdge, GraphLayer } from "./graph.js";
+import type { GraphNode, GraphEdge, GraphLayer, KnowledgeMeta, DomainMeta } from "./graph.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -117,6 +117,23 @@ export function formatContextForPrompt(context: ChatContext): string {
       lines.push(`- **Summary:** ${node.summary}`);
       if (node.tags.length > 0) lines.push(`- **Tags:** ${node.tags.join(", ")}`);
       if (node.languageNotes) lines.push(`- **Language Notes:** ${node.languageNotes}`);
+      if (node.knowledgeMeta) {
+        const km = node.knowledgeMeta;
+        lines.push(`- **Knowledge:**`);
+        if (km.authors?.length) lines.push(`  - Authors: ${km.authors.join(", ")}`);
+        if (km.publishedDate) lines.push(`  - Published: ${km.publishedDate}`);
+        if (km.source) lines.push(`  - Source: ${km.source}`);
+        if (km.citations?.length) lines.push(`  - Citations: ${km.citations.join(", ")}`);
+        if (km.relatedTopics?.length) lines.push(`  - Related Topics: ${km.relatedTopics.join(", ")}`);
+      }
+      if (node.domainMeta) {
+        const dm = node.domainMeta;
+        lines.push(`- **Domain:**`);
+        lines.push(`  - Entities: ${dm.entities.join(", ")}`);
+        if (dm.businessRules?.length) lines.push(`  - Business Rules: ${dm.businessRules.join("; ")}`);
+        if (dm.crossDomainInteractions?.length) lines.push(`  - Cross-Domain Interactions: ${dm.crossDomainInteractions.join("; ")}`);
+        if (dm.entryPoints?.length) lines.push(`  - Entry Points: ${dm.entryPoints.join(", ")}`);
+      }
       lines.push("");
     }
   }

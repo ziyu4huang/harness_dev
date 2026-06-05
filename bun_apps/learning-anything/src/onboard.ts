@@ -125,6 +125,54 @@ export function buildOnboardingGuide(graphStore: GraphStore): string {
     lines.push("");
   }
 
+  // --- Domain Entities ---
+  const domainNodes = nodes.filter(n => n.domainMeta);
+  if (domainNodes.length > 0) {
+    lines.push("## Domain Entities");
+    lines.push("");
+    for (const node of domainNodes) {
+      const dm = node.domainMeta!;
+      lines.push(`### ${node.name}`);
+      lines.push("");
+      lines.push(node.summary);
+      lines.push("");
+      lines.push(`**Entities:** ${dm.entities.join(", ")}`);
+      if (dm.businessRules?.length) {
+        lines.push("");
+        lines.push("**Business Rules:**");
+        for (const rule of dm.businessRules) {
+          lines.push(`- ${rule}`);
+        }
+      }
+      if (dm.crossDomainInteractions?.length) {
+        lines.push("");
+        lines.push(`**Cross-Domain Interactions:** ${dm.crossDomainInteractions.join("; ")}`);
+      }
+      if (dm.entryPoints?.length) {
+        lines.push("");
+        lines.push(`**Entry Points:** ${dm.entryPoints.join(", ")}`);
+      }
+      lines.push("");
+    }
+  }
+
+  // --- Knowledge Sources ---
+  const knowledgeNodes = nodes.filter(n => n.knowledgeMeta);
+  if (knowledgeNodes.length > 0) {
+    lines.push("## Knowledge Sources");
+    lines.push("");
+    lines.push("Key references and knowledge artifacts:");
+    lines.push("");
+    for (const node of knowledgeNodes) {
+      const km = node.knowledgeMeta!;
+      lines.push(`- **${node.name}** (${node.type}): ${node.summary}`);
+      if (km.authors?.length) lines.push(`  - Authors: ${km.authors.join(", ")}`);
+      if (km.source) lines.push(`  - Source: ${km.source}`);
+      if (km.publishedDate) lines.push(`  - Published: ${km.publishedDate}`);
+    }
+    lines.push("");
+  }
+
   // --- Footer ---
   lines.push("---");
   lines.push("");

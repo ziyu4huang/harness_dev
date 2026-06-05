@@ -5,12 +5,39 @@
  * and provides efficient querying by node type, layer, search, etc.
  */
 
-import { readFileSync, existsSync } from "fs";
-import { resolve, join } from "path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { resolve, join, dirname } from "path";
 import { validateGraph, type GraphIssue } from "./validate.js";
 import { SearchEngine, type SearchOptions } from "./search.js";
+import { SemanticSearchEngine, type SemanticSearchOptions } from "./semantic-search.js";
+import {
+  buildFingerprintStore,
+  analyzeChanges,
+  loadFingerprintStore,
+  saveFingerprintStore,
+  type FingerprintStore,
+  type ChangeAnalysis,
+} from "./fingerprint.js";
+import { classifyUpdate, type UpdateDecision } from "./change-classifier.js";
+import { detectLayers as detectLayersHeuristic, applyLLMLayers, type LLMLayerResponse } from "./layer-detector.js";
+import { detectLanguageConcepts, detectAllConcepts } from "./language-lesson.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+export interface KnowledgeMeta {
+  authors?: string[];
+  publishedDate?: string;
+  source?: string;
+  citations?: string[];
+  relatedTopics?: string[];
+}
+
+export interface DomainMeta {
+  entities: string[];
+  businessRules?: string[];
+  crossDomainInteractions?: string[];
+  entryPoints?: string[];
+}
 
 export interface GraphNode {
   id: string;
@@ -22,6 +49,9 @@ export interface GraphNode {
   tags: string[];
   complexity?: string;
   languageNotes?: string;
+  embedding?: number[];
+  knowledgeMeta?: KnowledgeMeta;
+  domainMeta?: DomainMeta;
 }
 
 export interface GraphEdge {
@@ -75,6 +105,7 @@ export class GraphStore {
   private filePath: string;
   private loadedAt = 0;
   private searchEngine: SearchEngine | null = null;
+  private semanticSearchEngine: SemanticSearchEngine | null = null;
 
   constructor(graphPath: string) {
     this.filePath = graphPath;
@@ -133,6 +164,162 @@ export class GraphStore {
 
     // Rebuild search engine index
     this.searchEngine = new SearchEngine(validated.nodes);
+
+    // Rebuild semantic search engine
+    this.semanticSearchEngine = new SemanticSearchEngine(validated.nodes);
+  }
+
+  /**
+   * Save the current in-memory graph back to disk.
+   * Converts absolute file paths to relative paths before writing (port of UA persistence).
+   * Returns the number of bytes written.
+   */
+  save(): number {
+    if (!this.graph) {
+      throw new Error("Cannot save: no graph loaded");
+    }
+
+    // Sanitize file paths to relative before writing
+    const sanitized = this.sanitizeForSave(this.graph);
+    const json = JSON.stringify(sanitized, null, 2);
+
+    // Ensure parent directory exists
+    const dir = dirname(this.filePath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    writeFileSync(this.filePath, json, "utf-8");
+    return json.length;
+  }
+
+  /**
+   * Sanitize graph data for persistence: convert absolute file paths to relative
+   * using the graph file's parent directories as the base.
+   * Port of UA's saveGraph path sanitization from persistence/index.ts.
+   */
+  private sanitizeForSave(graph: KnowledgeGraph): KnowledgeGraph {
+    // Compute base directory: the project root is two levels up from
+    // .understand-anything/knowledge-graph.json, or use graph file's dir
+    let baseDir = "";
+    if (this.filePath.includes(".understand-anything")) {
+      baseDir = resolve(this.filePath, "../..");
+    } else {
+      baseDir = resolve(this.filePath, "..");
+    }
+
+    const relativize = (fp: string | undefined): string | undefined => {
+      if (!fp) return fp;
+      if (!fp.includes("/") && !fp.includes("\\")) return fp; // already relative
+      try {
+        const abs = resolve(fp);
+        if (abs.startsWith(baseDir)) {
+          return abs.slice(baseDir.length + 1).replace(/\\/g, "/");
+        }
+      } catch {
+        // leave as-is
+      }
+      return fp;
+    };
+
+    return {
+      ...graph,
+      nodes: graph.nodes.map(n => ({
+        ...n,
+        filePath: relativize(n.filePath),
+      })),
+    };
+  }
+
+  /**
+   * Merge incremental analysis results into the graph.
+   * Port of UA's mergeGraphUpdate from staleness.ts.
+   * Removes stale nodes/edges for changed files, adds new ones.
+   * Returns counts of removed and added items.
+   */
+  mergeGraphUpdate(
+    changedFiles: string[],
+    newNodes: GraphNode[],
+    newEdges: GraphEdge[],
+  ): { removedNodes: number; removedEdges: number; addedNodes: number; addedEdges: number } {
+    if (!this.graph) {
+      throw new Error("Cannot merge: no graph loaded");
+    }
+
+    const changedFileSet = new Set(changedFiles.map(f => f.replace(/\\/g, "/")));
+
+    // Store original edge count before mutation for accurate removedEdges count
+    const originalEdgeCount = this.graph.edges.length;
+
+    // Remove nodes whose filePath matches a changed file
+    const removedNodeIds = new Set<string>();
+    const keptNodes = this.graph.nodes.filter(n => {
+      const fp = n.filePath?.replace(/\\/g, "/");
+      if (fp && changedFileSet.has(fp)) {
+        removedNodeIds.add(n.id);
+        return false;
+      }
+      return true;
+    });
+
+    // Remove edges connected to removed nodes
+    const keptEdges = this.graph.edges.filter(e =>
+      !removedNodeIds.has(e.source) && !removedNodeIds.has(e.target)
+    );
+
+    // Deduplicate new nodes (by id)
+    const existingIds = new Set(keptNodes.map(n => n.id));
+    const uniqueNewNodes = newNodes.filter(n => !existingIds.has(n.id));
+
+    // Deduplicate new edges (by source+target+type)
+    const existingEdgeKeys = new Set(
+      keptEdges.map(e => `${e.source}|${e.target}|${e.type}`)
+    );
+    const uniqueNewEdges = newEdges.filter(e => {
+      const key = `${e.source}|${e.target}|${e.type}`;
+      if (existingEdgeKeys.has(key)) return false;
+      existingEdgeKeys.add(key); // prevent duplicates within newEdges too
+      return true;
+    });
+
+    // Merge and update graph
+    this.graph = {
+      ...this.graph,
+      nodes: [...keptNodes, ...uniqueNewNodes],
+      edges: [...keptEdges, ...uniqueNewEdges],
+    };
+
+    // Rebuild indexes
+    this.nodeIndex.clear();
+    this.edgesBySource.clear();
+    this.edgesByTarget.clear();
+
+    for (const node of this.graph.nodes) {
+      this.nodeIndex.set(node.id, node);
+    }
+    for (const edge of this.graph.edges) {
+      const src = this.edgesBySource.get(edge.source) ?? [];
+      src.push(edge);
+      this.edgesBySource.set(edge.source, src);
+      const tgt = this.edgesByTarget.get(edge.target) ?? [];
+      tgt.push(edge);
+      this.edgesByTarget.set(edge.target, tgt);
+    }
+
+    // Rebuild search engine
+    this.searchEngine = new SearchEngine(this.graph.nodes);
+
+    // Rebuild semantic search engine
+    this.semanticSearchEngine = new SemanticSearchEngine(this.graph.nodes);
+
+    this._dirty = true;
+
+    return {
+      removedNodes: removedNodeIds.size,
+      removedEdges: originalEdgeCount - keptEdges.length,
+      addedNodes: uniqueNewNodes.length,
+      addedEdges: uniqueNewEdges.length,
+    };
   }
 
   /** Reload if stale (older than cacheTtlMs) */
@@ -207,6 +394,26 @@ export class GraphStore {
       if (node) nodes.push(node);
     }
     return nodes;
+  }
+
+  /** Semantic search using pre-computed vector embeddings and cosine similarity */
+  semanticSearch(queryEmbedding: number[], options?: Omit<SemanticSearchOptions, "limit"> & { limit?: number }): GraphNode[] {
+    this.ensureLoaded();
+    if (!this.semanticSearchEngine || !this.semanticSearchEngine.hasEmbeddings()) return [];
+
+    const limit = options?.limit ?? 50;
+    const results = this.semanticSearchEngine.search(queryEmbedding, { ...options, limit });
+    const nodes: GraphNode[] = [];
+    for (const r of results) {
+      const node = this.nodeIndex.get(r.nodeId);
+      if (node) nodes.push(node);
+    }
+    return nodes;
+  }
+
+  /** Get the semantic search engine for direct access (e.g., adding embeddings) */
+  getSemanticSearchEngine(): SemanticSearchEngine | null {
+    return this.semanticSearchEngine;
   }
 
   /** Get nodes by layer */
@@ -375,6 +582,99 @@ export class GraphStore {
     } catch {
       return { stale: false, changedFiles: [], graphCommitHash };
     }
+  }
+
+  /** Compute fingerprints for all file nodes in the graph. */
+  computeFingerprints(projectDir?: string): FingerprintStore {
+    this.ensureLoaded();
+    if (!projectDir) {
+      projectDir = this.filePath.includes(".understand-anything")
+        ? resolve(this.filePath, "../..")
+        : process.cwd();
+    }
+    const gitCommitHash = this.graph!.project.gitCommitHash;
+    return buildFingerprintStore(projectDir, this.graph!.nodes, gitCommitHash);
+  }
+
+  /** Analyze changes using fingerprints. Returns change analysis and update decision. */
+  analyzeChangesWithFingerprints(
+    changedFiles: string[],
+    projectDir?: string,
+  ): { analysis: ChangeAnalysis; decision: UpdateDecision } {
+    this.ensureLoaded();
+    if (!projectDir) {
+      projectDir = this.filePath.includes(".understand-anything")
+        ? resolve(this.filePath, "../..")
+        : process.cwd();
+    }
+
+    // Try to load existing fingerprint store
+    const fpPath = join(dirname(this.filePath), "fingerprints.json");
+    const existingStore = loadFingerprintStore(fpPath);
+
+    // If no existing store, build one now
+    const store = existingStore ?? this.computeFingerprints(projectDir);
+
+    const analysis = analyzeChanges(projectDir, changedFiles, store);
+
+    // Get all known file paths for directory change detection
+    const allKnownFiles = this.graph!.nodes
+      .filter(n => n.filePath)
+      .map(n => n.filePath!);
+
+    const decision = classifyUpdate(analysis, this.graph!.nodes.length, allKnownFiles);
+
+    return { analysis, decision };
+  }
+
+  /** Save fingerprint store to disk alongside the graph. */
+  saveFingerprints(store: FingerprintStore): void {
+    const fpPath = join(dirname(this.filePath), "fingerprints.json");
+    saveFingerprintStore(store, fpPath);
+  }
+
+  /** Load fingerprint store from disk. Returns null if not found. */
+  loadFingerprints(): FingerprintStore | null {
+    const fpPath = join(dirname(this.filePath), "fingerprints.json");
+    return loadFingerprintStore(fpPath);
+  }
+
+  /** Detect layers using heuristic directory patterns. Returns new layer array. */
+  detectLayersHeuristic(): import("./graph.js").GraphLayer[] {
+    this.ensureLoaded();
+    return detectLayersHeuristic(this.graph!.nodes);
+  }
+
+  /** Apply LLM-detected layers to graph nodes. Returns new layer array. */
+  applyDetectedLLMLayers(llmLayers: LLMLayerResponse[]): import("./graph.js").GraphLayer[] {
+    this.ensureLoaded();
+    return applyLLMLayers(this.graph!.nodes, llmLayers);
+  }
+
+  /** Detect language concepts for a specific node. */
+  detectNodeConcepts(nodeId: string): string[] {
+    const node = this.getNode(nodeId);
+    if (!node) return [];
+    return detectLanguageConcepts(node);
+  }
+
+  /** Detect language concepts across all nodes. Returns concept -> nodeIds map. */
+  detectAllConcepts(): Record<string, string[]> {
+    this.ensureLoaded();
+    return detectAllConcepts(this.graph!.nodes);
+  }
+
+  /** Track dirty state for graceful shutdown persistence. */
+  private _dirty = false;
+
+  /** Mark the graph as modified since last save. */
+  markDirty(): void {
+    this._dirty = true;
+  }
+
+  /** Check if the graph has been modified since last save. */
+  get dirty(): boolean {
+    return this._dirty;
   }
 
   /** Stats summary */

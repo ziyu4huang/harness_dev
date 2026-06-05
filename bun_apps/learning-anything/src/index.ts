@@ -15,6 +15,7 @@
 import { getEnv, LIMITS } from "./config.js";
 import { GraphStore } from "./graph.js";
 import { handleRequest } from "./routes.js";
+import { cleanup } from "./middleware.js";
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -103,18 +104,52 @@ console.log(`  GET  /api/health/detailed    Detailed health + layer scores`);
 console.log(`  GET  /api/hotspots           Complexity hotspots`);
 console.log(`  GET  /api/path?from=&to=     Path between nodes`);
 console.log(`  POST /api/graph/reload       Reload graph from disk`);
+console.log(`  POST /api/graph/save         Save graph to disk`);
+console.log(`  POST /api/graph/merge        Merge incremental updates`);
+console.log(`  POST /api/tour/generate      Generate heuristic tour`);
+console.log(`  GET  /api/search/semantic    Semantic search (embedding query)`);
+console.log(`  POST /api/search/semantic    Semantic search (embedding body)`);
+console.log(`  GET  /api/graph/fingerprints Inspect fingerprint store`);
+console.log(`  POST /api/graph/fingerprints/compute  Compute fingerprints`);
+console.log(`  POST /api/graph/analyze-changes      Analyze changes via fingerprints`);
+console.log(`  GET  /api/layers/detect      Heuristic layer detection`);
+console.log(`  POST /api/layers/detect/llm  LLM-based layer detection`);
+console.log(`  POST /api/tour/language-lesson Generate language lesson for node`);
+console.log(`  GET  /api/language/concepts  Detect language concepts across graph`);
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────────────
 
-process.on("SIGINT", () => {
-  console.log("\nShutting down...");
-  server.stop();
-  process.exit(0);
-});
+let isShuttingDown = false;
 
-process.on("SIGTERM", () => {
+async function gracefulShutdown(signal: string) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`\nReceived ${signal}. Shutting down gracefully...`);
+
+  // 1. Stop accepting new connections
   server.stop();
+  console.log("  Server stopped accepting new connections.");
+
+  // 2. Save graph state if dirty
+  if (graphStore.dirty) {
+    try {
+      const bytesWritten = graphStore.save();
+      console.log(`  Graph state saved (${bytesWritten} bytes).`);
+    } catch (err) {
+      console.error(`  Failed to save graph state: ${(err as Error).message}`);
+    }
+  }
+
+  // 3. Clean up middleware resources (rate limiter interval, response cache)
+  cleanup();
+  console.log("  Middleware resources cleaned up.");
+
+  console.log("  Shutdown complete.");
   process.exit(0);
-});
+}
+
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
 export { graphStore };

@@ -25,8 +25,12 @@ import { getEnv, LIMITS } from "./config.js";
 import * as agent from "./agent.js";
 import type { AgentMessage } from "./agent.js";
 import { validateGraph } from "./validate.js";
-import { requestLogger, logResponse, rateLimiter, classifyError } from "./middleware.js";
+import { requestLogger, logResponse, rateLimiter, classifyError, checkResponseCache, storeResponseCache, invalidateResponseCache } from "./middleware.js";
 import { createIgnoreFilter } from "./ignore.js";
+import { generateHeuristicTour, type TourGroupingMode } from "./tour.js";
+import { cosineSimilarity } from "./semantic-search.js";
+import { contentHash } from "./fingerprint.js";
+import type { LLMLayerResponse } from "./layer-detector.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -39,6 +43,23 @@ function json(data: unknown, status = 200): Response {
 
 function error(message: string, status = 400): Response {
   return json({ error: message }, status);
+}
+
+/**
+ * Validate that a request body has all required fields.
+ * Returns a 400 error Response if any field is missing, otherwise returns null.
+ */
+function validateBody(body: unknown, requiredFields: string[]): Response | null {
+  if (!body || typeof body !== "object") {
+    return error("Request body must be a JSON object");
+  }
+  const obj = body as Record<string, unknown>;
+  for (const field of requiredFields) {
+    if (obj[field] === undefined || obj[field] === null || obj[field] === "") {
+      return error(`Missing required field: ${field}`);
+    }
+  }
+  return null;
 }
 
 /** Parse URL path segments after /api/ */
@@ -146,6 +167,57 @@ const GET_ROUTES: Record<string, Handler> = {
       })),
     });
   },
+
+  "api/search/semantic": async (_s, q, _b, gs) => {
+    gs.ensureLoaded();
+    const engine = gs.getSemanticSearchEngine();
+    if (!engine || !engine.hasEmbeddings()) {
+      return json({ nodes: [], count: 0, message: "No embeddings available. Pre-compute embeddings and add them to nodes." });
+    }
+    // For GET, accept comma-separated embedding values via ?e= query param
+    const embeddingStr = q.get("e");
+    if (!embeddingStr) return error("Missing query parameter: e (comma-separated embedding values)");
+    const embedding = embeddingStr.split(",").map(Number).filter(n => !isNaN(n));
+    if (embedding.length === 0) return error("Invalid embedding values");
+    const threshold = q.get("threshold") ? parseFloat(q.get("threshold")!) : undefined;
+    const limit = parseInt(q.get("limit") ?? "10", 10);
+    const typesStr = q.get("types");
+    const types = typesStr ? typesStr.split(",") : undefined;
+    const nodes = gs.semanticSearch(embedding, { threshold, limit, types });
+    return json({ nodes, count: nodes.length });
+  },
+
+  "api/graph/fingerprints": async (_s, _q, _b, gs) => {
+    gs.ensureLoaded();
+    const store = gs.loadFingerprints();
+    if (!store) {
+      return json({ message: "No fingerprint store found. Compute fingerprints first via POST /api/graph/fingerprints/compute." });
+    }
+    return json({
+      version: store.version,
+      gitCommitHash: store.gitCommitHash,
+      generatedAt: store.generatedAt,
+      fileCount: Object.keys(store.files).length,
+      files: store.files,
+    });
+  },
+
+  "api/layers/detect": async (_s, _q, _b, gs) => {
+    gs.ensureLoaded();
+    const layers = gs.detectLayersHeuristic();
+    return json({ layers, count: layers.length, mode: "heuristic" });
+  },
+
+  "api/language/concepts": async (_s, _q, _b, gs) => {
+    gs.ensureLoaded();
+    const conceptMap = gs.detectAllConcepts();
+    const summary = Object.entries(conceptMap).map(([concept, nodeIds]) => ({
+      concept,
+      nodeCount: nodeIds.length,
+      nodeIds: nodeIds.slice(0, 20),
+    }));
+    return json({ concepts: summary, totalConcepts: summary.length });
+  },
 };
 
 // Dynamic path routes (need special handling)
@@ -200,15 +272,19 @@ async function handleDynamicGet(
 
 const POST_ROUTES: Record<string, Handler> = {
   "api/chat": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["messages"]);
+    if (validationErr) return validationErr;
     const { messages, model } = body as { messages: AgentMessage[]; model?: string };
-    if (!messages?.length) return error("Missing messages array");
+    if (!Array.isArray(messages) || messages.length === 0) return error("messages must be a non-empty array");
     const result = await agent.chat(messages, model ?? "flash", gs);
     return json(result);
   },
 
   "api/chat/stream": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["messages"]);
+    if (validationErr) return validationErr;
     const { messages, model } = body as { messages: AgentMessage[]; model?: string };
-    if (!messages?.length) return error("Missing messages array");
+    if (!Array.isArray(messages) || messages.length === 0) return error("messages must be a non-empty array");
     const stream = await agent.chatStream(messages, model ?? "flash", gs);
     return new Response(stream, {
       headers: {
@@ -220,50 +296,55 @@ const POST_ROUTES: Record<string, Handler> = {
   },
 
   "api/analyze/root-cause": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["problem"]);
+    if (validationErr) return validationErr;
     const { problem, model } = body as { problem: string; model?: string };
-    if (!problem) return error("Missing problem description");
     const result = await agent.rootCauseAnalysis(problem, gs, model ?? "pro");
     return json(result);
   },
 
   "api/analyze/architecture": async (_s, _q, body, gs) => {
-    const { model } = body as { model?: string };
+    const { model } = (body as { model?: string }) ?? {};
     const result = await agent.analyzeArchitecture(gs, model ?? "pro");
     return json(result);
   },
 
   "api/workflow/design": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["goal"]);
+    if (validationErr) return validationErr;
     const { goal, model } = body as { goal: string; model?: string };
-    if (!goal) return error("Missing goal description");
     const result = await agent.designWorkflow(goal, gs, model ?? "pro");
     return json(result);
   },
 
   "api/explain": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["path"]);
+    if (validationErr) return validationErr;
     const { path, model } = body as { path: string; model?: string };
-    if (!path) return error("Missing path parameter");
     const result = await agent.explainNode(path, gs, model ?? "pro");
     return json(result);
   },
 
   "api/diff/analyze": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["changedFiles"]);
+    if (validationErr) return validationErr;
     const { changedFiles, model } = body as { changedFiles: string[]; model?: string };
-    if (!changedFiles?.length) return error("Missing changedFiles array");
+    if (!Array.isArray(changedFiles) || changedFiles.length === 0) return error("changedFiles must be a non-empty array");
     const result = await agent.analyzeDiff(changedFiles, gs, model ?? "pro");
     return json(result);
   },
 
   "api/analyze/file": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["filePath", "content"]);
+    if (validationErr) return validationErr;
     const { filePath, content, model } = body as { filePath: string; content: string; model?: string };
-    if (!filePath) return error("Missing filePath parameter");
-    if (!content) return error("Missing content parameter");
     const result = await agent.analyzeFile(filePath, content, gs, model ?? "pro");
     return json(result);
   },
 
   "api/analyze/project-summary": async (_s, _q, body, gs) => {
     gs.ensureLoaded();
-    const { model } = body as { model?: string };
+    const { model } = (body as { model?: string }) ?? {};
     const result = await agent.summarizeProject(gs, model ?? "pro");
     return json(result);
   },
@@ -271,9 +352,136 @@ const POST_ROUTES: Record<string, Handler> = {
   "api/graph/reload": async (_s, _q, _b, gs) => {
     try {
       gs.load();
+      invalidateResponseCache();
       return json({ status: "reloaded", stats: gs.getStats() });
     } catch (e) {
       return error(`Reload failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/graph/save": async (_s, _q, _b, gs) => {
+    try {
+      const bytesWritten = gs.save();
+      invalidateResponseCache();
+      return json({ status: "saved", bytesWritten, stats: gs.getStats() });
+    } catch (e) {
+      return error(`Save failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/graph/merge": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["changedFiles"]);
+    if (validationErr) return validationErr;
+    const { changedFiles, newNodes, newEdges } = body as {
+      changedFiles: string[];
+      newNodes: import("./graph.js").GraphNode[];
+      newEdges: import("./graph.js").GraphEdge[];
+    };
+    if (!Array.isArray(changedFiles) || changedFiles.length === 0) return error("changedFiles must be a non-empty array");
+    if (!Array.isArray(newNodes) && !Array.isArray(newEdges)) return error("Missing newNodes or newEdges");
+    try {
+      const result = gs.mergeGraphUpdate(changedFiles, newNodes ?? [], newEdges ?? []);
+      invalidateResponseCache();
+      return json({ status: "merged", ...result, stats: gs.getStats() });
+    } catch (e) {
+      return error(`Merge failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/tour/generate": async (_s, _q, body, gs) => {
+    gs.ensureLoaded();
+    const { mode, batchSize } = body as { mode?: TourGroupingMode; batchSize?: number };
+    const graph = gs.data;
+    const tour = generateHeuristicTour(
+      graph.nodes,
+      graph.edges,
+      graph.layers,
+      { mode: mode ?? "batch", batchSize },
+    );
+    return json({ tour, stepCount: tour.length, mode: mode ?? "batch" });
+  },
+
+  "api/search/semantic": async (_s, _q, body, gs) => {
+    gs.ensureLoaded();
+    const validationErr = validateBody(body, ["embedding"]);
+    if (validationErr) return validationErr;
+    const { embedding, types, threshold, limit } = body as {
+      embedding: number[];
+      types?: string[];
+      threshold?: number;
+      limit?: number;
+    };
+    if (!Array.isArray(embedding) || embedding.length === 0 || typeof embedding[0] !== "number") {
+      return error("'embedding' must be a non-empty array of numbers");
+    }
+    const engine = gs.getSemanticSearchEngine();
+    if (!engine || !engine.hasEmbeddings()) {
+      return json({ nodes: [], count: 0, message: "No embeddings available. Pre-compute embeddings and add them to nodes." });
+    }
+    const nodes = gs.semanticSearch(embedding, { types, threshold, limit: limit ?? 10 });
+    return json({ nodes, count: nodes.length });
+  },
+
+  "api/graph/fingerprints/compute": async (_s, _q, body, gs) => {
+    gs.ensureLoaded();
+    const { projectDir } = body as { projectDir?: string };
+    try {
+      const store = gs.computeFingerprints(projectDir);
+      gs.saveFingerprints(store);
+      return json({
+        status: "computed",
+        fileCount: Object.keys(store.files).length,
+        gitCommitHash: store.gitCommitHash,
+        generatedAt: store.generatedAt,
+      });
+    } catch (e) {
+      return error(`Fingerprint computation failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/graph/analyze-changes": async (_s, _q, body, gs) => {
+    const validationErr = validateBody(body, ["changedFiles"]);
+    if (validationErr) return validationErr;
+    const { changedFiles, projectDir } = body as { changedFiles: string[]; projectDir?: string };
+    if (!Array.isArray(changedFiles) || changedFiles.length === 0) return error("changedFiles must be a non-empty array");
+    try {
+      const result = gs.analyzeChangesWithFingerprints(changedFiles, projectDir);
+      return json({
+        analysis: result.analysis,
+        decision: result.decision,
+      });
+    } catch (e) {
+      return error(`Change analysis failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/layers/detect/llm": async (_s, _q, body, gs) => {
+    gs.ensureLoaded();
+    const { model } = body as { model?: string };
+    try {
+      const layers = await agent.detectLayersLLM(gs, model ?? "pro");
+      // Also apply the layers to get node assignments
+      const appliedLayers = gs.applyDetectedLLMLayers(layers);
+      return json({
+        layers: appliedLayers,
+        count: appliedLayers.length,
+        mode: "llm",
+      });
+    } catch (e) {
+      return error(`LLM layer detection failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/tour/language-lesson": async (_s, _q, body, gs) => {
+    gs.ensureLoaded();
+    const validationErr = validateBody(body, ["nodeId"]);
+    if (validationErr) return validationErr;
+    const { nodeId, language, model } = body as { nodeId: string; language?: string; model?: string };
+    try {
+      const result = await agent.generateLanguageLesson(nodeId, gs, language ?? "TypeScript", model ?? "pro");
+      return json(result);
+    } catch (e) {
+      return error(`Language lesson generation failed: ${(e as Error).message}`, 500);
     }
   },
 };
@@ -331,6 +539,23 @@ export async function handleRequest(
     );
   }
 
+  // Response cache: check for cached GET responses
+  if (method === "GET") {
+    const cached = checkResponseCache(method, ctx.path, query.toString(), request.headers.get("if-none-match"));
+    if (cached) {
+      const elapsed = Date.now() - ctx.startTime;
+      logResponse(ctx, cached.status);
+      // Merge CORS headers
+      const mergedCacheHeaders: Record<string, string> = {
+        ...Object.fromEntries(cached.headers),
+        ...corsHeaders,
+        "X-Response-Time": `${elapsed}ms`,
+        "X-Cache": "HIT",
+      };
+      return new Response(cached.body, { status: cached.status, headers: mergedCacheHeaders });
+    }
+  }
+
   try {
     let resp: Response;
 
@@ -359,7 +584,20 @@ export async function handleRequest(
         let body: unknown = null;
         const contentType = request.headers.get("content-type") ?? "";
         if (contentType.includes("application/json")) {
-          body = await request.json();
+          try {
+            body = await request.json();
+          } catch {
+            resp = error("Malformed JSON in request body", 400);
+            // Add middleware headers to response
+            const elapsed = Date.now() - ctx.startTime;
+            const mergedHeaders: Record<string, string> = {
+              ...Object.fromEntries(resp.headers),
+              ...corsHeaders,
+              "X-Response-Time": `${elapsed}ms`,
+            };
+            logResponse(ctx, resp.status);
+            return new Response(resp.body, { status: resp.status, headers: mergedHeaders });
+          }
         }
         resp = await handler(segments, query, body, graphStore);
       }
@@ -373,9 +611,20 @@ export async function handleRequest(
       ...Object.fromEntries(resp.headers),
       ...corsHeaders,
       "X-Response-Time": `${elapsed}ms`,
+      "X-Cache": "MISS",
     };
 
     logResponse(ctx, resp.status);
+
+    // Cache GET responses for future requests
+    if (method === "GET" && resp.status >= 200 && resp.status < 300) {
+      try {
+        const bodyText = await resp.clone().text();
+        storeResponseCache(method, ctx.path, query.toString(), bodyText, mergedHeaders);
+      } catch {
+        // Non-cacheable response body, skip caching
+      }
+    }
 
     return new Response(resp.body, {
       status: resp.status,

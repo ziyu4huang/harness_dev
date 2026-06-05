@@ -54,6 +54,27 @@ export const NODE_TYPE_ALIASES: Record<string, string> = {
   business_process: "concept",
   task: "concept",
   business_step: "concept",
+  // Phase 2 aliases for new UA node types
+  knowledge: "article",
+  tutorial: "article",
+  guide: "article",
+  wiki: "article",
+  data_entity: "entity",
+  model: "entity",
+  subject: "topic",
+  theme: "topic",
+  argument: "claim",
+  proposition: "claim",
+  assertion: "claim",
+  reference: "source",
+  citation: "source",
+  procedure: "flow",
+  process: "flow",
+  workflow: "flow",
+  stage: "step",
+  phase: "step",
+  area: "domain",
+  subject_area: "domain",
 };
 
 /** Aliases that LLMs commonly generate instead of canonical edge types */
@@ -123,10 +144,29 @@ export const DIRECTION_ALIASES: Record<string, string> = {
 
 // ─── Zod Schemas ────────────────────────────────────────────────────────────
 
+// Knowledge metadata for knowledge-graph-type nodes (article, entity, topic, claim, source)
+export const KnowledgeMetaSchema = z.object({
+  authors: z.array(z.string()).optional(),
+  publishedDate: z.string().optional(),
+  source: z.string().optional(),
+  citations: z.array(z.string()).optional(),
+  relatedTopics: z.array(z.string()).optional(),
+}).optional();
+
+// Domain metadata for domain-modeling nodes (domain, flow, step)
+export const DomainMetaSchema = z.object({
+  entities: z.array(z.string()),
+  businessRules: z.array(z.string()).optional(),
+  crossDomainInteractions: z.array(z.string()).optional(),
+  entryPoints: z.array(z.string()).optional(),
+}).optional();
+
 const NODE_TYPE_ENUM = z.enum([
   "file", "function", "class", "module", "concept",
   "config", "document", "service", "table", "endpoint",
   "pipeline", "schema", "resource",
+  // Phase 2: additional UA node types (from UA types.ts)
+  "domain", "flow", "step", "article", "entity", "topic", "claim", "source",
 ]);
 
 const EDGE_TYPE_ENUM = z.enum([
@@ -150,6 +190,9 @@ export const GraphNodeSchema = z.object({
   tags: z.array(z.string()),
   complexity: z.enum(["simple", "moderate", "complex"]),
   languageNotes: z.string().optional(),
+  embedding: z.array(z.number()).optional(),
+  knowledgeMeta: KnowledgeMetaSchema,
+  domainMeta: DomainMetaSchema,
 }).passthrough();
 
 export const GraphEdgeSchema = z.object({

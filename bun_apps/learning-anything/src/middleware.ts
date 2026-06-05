@@ -225,3 +225,119 @@ export function errorBoundary<T>(
     }
   })();
 }
+
+// ─── Response Cache ──────────────────────────────────────────────────────────
+
+interface CacheEntry {
+  body: string;
+  headers: Record<string, string>;
+  etag: string;
+  cachedAt: number;
+}
+
+let responseCache = new Map<string, CacheEntry>();
+
+/** Default cache TTL for GET responses (30 seconds). */
+const DEFAULT_CACHE_TTL_MS = 30_000;
+
+/**
+ * Generate an ETag from a response body.
+ */
+export function generateETag(body: string): string {
+  // Simple hash-based ETag
+  let hash = 0;
+  for (let i = 0; i < body.length; i++) {
+    const char = body.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return `W/"${Math.abs(hash).toString(36)}"`;
+}
+
+/**
+ * Check the response cache for a GET request.
+ * Returns a cached Response if a valid entry exists and the client's
+ * If-None-Match header matches, returns 304 Not Modified.
+ * Returns null if no valid cache entry exists.
+ */
+export function checkResponseCache(
+  method: string,
+  path: string,
+  query: string,
+  ifNoneMatch?: string | null,
+): Response | null {
+  if (method !== "GET") return null;
+
+  const cacheKey = `${method}:${path}?${query}`;
+  const entry = responseCache.get(cacheKey);
+  if (!entry) return null;
+
+  // Check TTL
+  if (Date.now() - entry.cachedAt > DEFAULT_CACHE_TTL_MS) {
+    responseCache.delete(cacheKey);
+    return null;
+  }
+
+  // Check If-None-Match for 304
+  if (ifNoneMatch && ifNoneMatch === entry.etag) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ...entry.headers,
+        "ETag": entry.etag,
+      },
+    });
+  }
+
+  // Return cached response
+  return new Response(entry.body, {
+    status: 200,
+    headers: {
+      ...entry.headers,
+      "ETag": entry.etag,
+    },
+  });
+}
+
+/**
+ * Store a response in the cache (GET requests only).
+ */
+export function storeResponseCache(
+  method: string,
+  path: string,
+  query: string,
+  body: string,
+  headers: Record<string, string>,
+): void {
+  if (method !== "GET") return;
+  const cacheKey = `${method}:${path}?${query}`;
+  responseCache.set(cacheKey, {
+    body,
+    headers: { ...headers },
+    etag: generateETag(body),
+    cachedAt: Date.now(),
+  });
+}
+
+/**
+ * Invalidate the entire response cache.
+ * Call when the graph is modified (merge, reload, save).
+ */
+export function invalidateResponseCache(): void {
+  responseCache.clear();
+}
+
+// ─── Cleanup ─────────────────────────────────────────────────────────────────
+
+/**
+ * Clean up all resources: rate limiter interval and response cache.
+ * Call this on graceful shutdown.
+ */
+export function cleanup(): void {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+  }
+  responseCache.clear();
+  rateLimitStore.clear();
+}
+

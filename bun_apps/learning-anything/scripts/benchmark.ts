@@ -619,6 +619,424 @@ async function benchmark(): Promise<BenchmarkReport> {
     });
     features.push({ feature: "middleware-layer", status: mwOk ? "present" : "missing", evidence: "requestLogger, classifyError, rateLimiter" });
 
+    // Runtime Test 19: Expanded node types (21 UA types pass validation)
+    const rt19 = Date.now();
+    const EXPANDED_NODE_TYPES_GRAPH = {
+      version: "1.0.0",
+      kind: "codebase",
+      project: {
+        name: "node-type-test",
+        languages: ["typescript"],
+        frameworks: ["bun"],
+        description: "Node type coverage test",
+        analyzedAt: "2025-01-01",
+        gitCommitHash: "abc123",
+      },
+      nodes: [
+        { id: "n1", type: "file", name: "a.ts", summary: "file", tags: [], complexity: "simple" },
+        { id: "n2", type: "function", name: "fn", summary: "fn", tags: [], complexity: "simple" },
+        { id: "n3", type: "class", name: "cls", summary: "cls", tags: [], complexity: "simple" },
+        { id: "n4", type: "module", name: "mod", summary: "mod", tags: [], complexity: "simple" },
+        { id: "n5", type: "concept", name: "cpt", summary: "cpt", tags: [], complexity: "simple" },
+        { id: "n6", type: "config", name: "cfg", summary: "cfg", tags: [], complexity: "simple" },
+        { id: "n7", type: "document", name: "doc", summary: "doc", tags: [], complexity: "simple" },
+        { id: "n8", type: "service", name: "svc", summary: "svc", tags: [], complexity: "simple" },
+        { id: "n9", type: "table", name: "tbl", summary: "tbl", tags: [], complexity: "simple" },
+        { id: "n10", type: "endpoint", name: "ep", summary: "ep", tags: [], complexity: "simple" },
+        { id: "n11", type: "pipeline", name: "pipe", summary: "pipe", tags: [], complexity: "simple" },
+        { id: "n12", type: "schema", name: "sch", summary: "sch", tags: [], complexity: "simple" },
+        { id: "n13", type: "resource", name: "res", summary: "res", tags: [], complexity: "simple" },
+        // New UA node types
+        { id: "n14", type: "domain", name: "dom", summary: "dom", tags: [], complexity: "simple" },
+        { id: "n15", type: "flow", name: "flw", summary: "flw", tags: [], complexity: "simple" },
+        { id: "n16", type: "step", name: "stp", summary: "stp", tags: [], complexity: "simple" },
+        { id: "n17", type: "article", name: "art", summary: "art", tags: [], complexity: "simple" },
+        { id: "n18", type: "entity", name: "ent", summary: "ent", tags: [], complexity: "simple" },
+        { id: "n19", type: "topic", name: "top", summary: "top", tags: [], complexity: "simple" },
+        { id: "n20", type: "claim", name: "clm", summary: "clm", tags: [], complexity: "simple" },
+        { id: "n21", type: "source", name: "src", summary: "src", tags: [], complexity: "simple" },
+      ],
+      edges: [],
+      layers: [],
+      tour: [],
+    };
+    const expandedResult = vg(EXPANDED_NODE_TYPES_GRAPH);
+    const expandedOk = expandedResult.success && expandedResult.data!.nodes.length === 21;
+    results.push({
+      name: "runtime-expanded-node-types",
+      category: "runtime",
+      passed: expandedOk,
+      latencyMs: Date.now() - rt19,
+      failureReason: expandedOk ? undefined : `Expanded types: success=${expandedResult.success}, nodes=${expandedResult.data?.nodes.length}/21`,
+    });
+    features.push({ feature: "expanded-node-types", status: expandedOk ? "present" : "missing", evidence: "21 UA node types pass validation" });
+
+    // Runtime Test 20: Graph save/merge persistence
+    const rt20 = Date.now();
+    let persistenceOk = false;
+    try {
+      const savePath = join(tmpDir, "save-test.json");
+      writeFileSync(savePath, JSON.stringify(TEST_GRAPH, null, 2));
+      const { GraphStore: GS2 } = await import(join(ROOT, "src", "graph.ts"));
+
+      // Test save
+      const saveStore = new GS2(savePath);
+      saveStore.load();
+      const bytesWritten = saveStore.save();
+      const saveOk = bytesWritten > 0 && existsSync(savePath);
+
+      // Test merge: remove nodes for a.ts, add new node
+      const mergeResult = saveStore.mergeGraphUpdate(
+        ["a.ts"],
+        [{ id: "new:fn", type: "function", name: "newFn", filePath: "a.ts", summary: "New function", tags: [], complexity: "simple" }],
+        [{ source: "new:fn", target: "fn:b.ts:query", type: "calls" }],
+      );
+      const mergeOk = mergeResult.removedNodes > 0 && mergeResult.addedNodes === 1 && mergeResult.addedEdges === 1;
+
+      persistenceOk = saveOk && mergeOk;
+    } catch (err) {
+      persistenceOk = false;
+    }
+    results.push({
+      name: "runtime-graph-persistence",
+      category: "runtime",
+      passed: persistenceOk,
+      latencyMs: Date.now() - rt20,
+      failureReason: persistenceOk ? undefined : "Graph save/merge persistence test failed",
+    });
+    features.push({ feature: "graph-persistence", status: persistenceOk ? "present" : "missing", evidence: "GraphStore.save() + mergeGraphUpdate()" });
+
+    // Runtime Test 21: Tour generation with heuristic topological sort
+    const rt21 = Date.now();
+    let tourOk = false;
+    try {
+      const { generateHeuristicTour: ght } = await import(join(ROOT, "src", "tour.ts"));
+      const tourResult = ght(TEST_GRAPH.nodes, TEST_GRAPH.edges, TEST_GRAPH.layers, { mode: "batch", batchSize: 3 });
+      const tourLayerResult = ght(TEST_GRAPH.nodes, TEST_GRAPH.edges, TEST_GRAPH.layers, { mode: "layer" });
+      tourOk = tourResult.length > 0 && tourLayerResult.length > 0
+        && tourResult.every(t => t.order > 0 && t.nodeIds.length > 0)
+        && tourLayerResult.every(t => t.order > 0 && t.nodeIds.length > 0);
+    } catch (err) {
+      tourOk = false;
+    }
+    results.push({
+      name: "runtime-tour-generation",
+      category: "runtime",
+      passed: tourOk,
+      latencyMs: Date.now() - rt21,
+      failureReason: tourOk ? undefined : "Tour generation test failed",
+    });
+    features.push({ feature: "tour-generation", status: tourOk ? "present" : "missing", evidence: "generateHeuristicTour with batch and layer modes" });
+
+    // Runtime Test 22: Semantic search with cosine similarity
+    const rt22 = Date.now();
+    let semanticOk = false;
+    try {
+      const { cosineSimilarity: cs, SemanticSearchEngine: SSE } = await import(join(ROOT, "src", "semantic-search.ts"));
+      // Test cosine similarity correctness
+      const sim1 = cs([1, 0, 0], [1, 0, 0]); // identical => 1.0
+      const sim2 = cs([1, 0, 0], [0, 1, 0]); // orthogonal => 0.0
+      const sim3 = cs([1, 1, 1], [1, 1, 1]); // identical => 1.0
+      const sim4 = cs([1, 2, 3], [4, 5, 6]); // dot=32, magA=sqrt(14), magB=sqrt(77) => 32/sqrt(1078)
+      const cosCorrect = Math.abs(sim1 - 1.0) < 0.001
+        && Math.abs(sim2) < 0.001
+        && Math.abs(sim3 - 1.0) < 0.001
+        && Math.abs(sim4 - 32 / Math.sqrt(1078)) < 0.001;
+
+      // Test SemanticSearchEngine with nodes that have embeddings
+      const embeddedNodes = [
+        { id: "n1", type: "function", name: "auth", summary: "Auth function", tags: [], complexity: "simple", embedding: [1, 0, 0] },
+        { id: "n2", type: "function", name: "db", summary: "DB function", tags: [], complexity: "simple", embedding: [0, 1, 0] },
+        { id: "n3", type: "function", name: "api", summary: "API function", tags: [], complexity: "simple", embedding: [0.8, 0.2, 0] },
+      ];
+      const semEngine = new SSE(embeddedNodes);
+      const hasEmb = semEngine.hasEmbeddings();
+      const semResults = semEngine.search([1, 0, 0], { limit: 3 });
+      // n1 (sim=1.0, score=0.0) should be first, n3 (sim~0.96, score~0.04) second, n2 (sim=0, score=1) third
+      const rankingOk = semResults.length === 3
+        && semResults[0].nodeId === "n1"
+        && semResults[0].score < semResults[1].score;
+
+      // Test type filtering
+      const filteredResults = semEngine.search([1, 0, 0], { types: ["class"] });
+      const filterOk = filteredResults.length === 0;
+
+      // Test threshold
+      const thresholdResults = semEngine.search([1, 0, 0], { threshold: 0.5 });
+      const threshOk = thresholdResults.length === 2; // n1 and n3 have sim >= 0.5
+
+      semanticOk = cosCorrect && hasEmb && rankingOk && filterOk && threshOk;
+    } catch (err) {
+      semanticOk = false;
+    }
+    results.push({
+      name: "runtime-semantic-search",
+      category: "runtime",
+      passed: semanticOk,
+      latencyMs: Date.now() - rt22,
+      failureReason: semanticOk ? undefined : "Semantic search / cosine similarity test failed",
+    });
+    features.push({ feature: "semantic-search", status: semanticOk ? "present" : "missing", evidence: "cosineSimilarity + SemanticSearchEngine with embeddings" });
+
+    // Runtime Test 23: KnowledgeMeta / DomainMeta in graph nodes
+    const rt23 = Date.now();
+    let metaOk = false;
+    try {
+      const META_GRAPH = {
+        version: "1.0.0",
+        kind: "codebase",
+        project: {
+          name: "meta-test",
+          languages: ["typescript"],
+          frameworks: ["bun"],
+          description: "Metadata test",
+          analyzedAt: "2025-01-01",
+          gitCommitHash: "abc123",
+        },
+        nodes: [
+          {
+            id: "domain:auth", type: "domain", name: "Authentication", summary: "Auth domain",
+            tags: ["auth"], complexity: "moderate",
+            domainMeta: {
+              entities: ["User", "Session", "Token"],
+              businessRules: ["Token expires after 24h", "Max 3 concurrent sessions"],
+              crossDomainInteractions: ["User -> Billing for subscription check"],
+              entryPoints: ["POST /login", "POST /logout"],
+            },
+          },
+          {
+            id: "article:oauth", type: "article", name: "OAuth Guide", summary: "OAuth implementation guide",
+            tags: ["oauth", "docs"], complexity: "simple",
+            knowledgeMeta: {
+              authors: ["Team Lead"],
+              publishedDate: "2025-01-15",
+              source: "internal-wiki",
+              citations: ["RFC 6749", "RFC 6750"],
+              relatedTopics: ["authentication", "security"],
+            },
+          },
+          { id: "fn:login", type: "function", name: "login", summary: "Login handler", tags: ["auth"], complexity: "simple" },
+        ],
+        edges: [
+          { source: "domain:auth", target: "fn:login", type: "contains" },
+        ],
+        layers: [],
+        tour: [],
+      };
+
+      // Test validation accepts nodes with metadata
+      const { validateGraph: vg2 } = await import(join(ROOT, "src", "validate.ts"));
+      const metaValResult = vg2(META_GRAPH);
+      const valOk = metaValResult.success && metaValResult.data!.nodes.length === 3;
+
+      // Test onboarding renders domain entities and knowledge sources
+      const metaGraphPath = join(tmpDir, "meta-graph.json");
+      writeFileSync(metaGraphPath, JSON.stringify(META_GRAPH, null, 2));
+      const { GraphStore: GS3 } = await import(join(ROOT, "src", "graph.ts"));
+      const metaStore = new GS3(metaGraphPath);
+      metaStore.load();
+
+      const { buildOnboardingGuide: bog2 } = await import(join(ROOT, "src", "onboard.ts"));
+      const metaGuide = bog2(metaStore);
+      const onboardOk = metaGuide.includes("## Domain Entities")
+        && metaGuide.includes("User, Session, Token")
+        && metaGuide.includes("## Knowledge Sources")
+        && metaGuide.includes("OAuth Guide");
+
+      // Test explain renders domain context
+      const { buildExplainContext: bec2, formatExplainPrompt: fep2 } = await import(join(ROOT, "src", "explain.ts"));
+      const metaExplainCtx = bec2(metaStore, "domain:auth");
+      const metaExplainPrompt = fep2(metaExplainCtx);
+      const explainOk = metaExplainPrompt.includes("## Domain Context")
+        && metaExplainPrompt.includes("User, Session, Token")
+        && metaExplainPrompt.includes("Token expires after 24h");
+
+      // Test context renders metadata
+      const { buildChatContext: bcc2, formatContextForPrompt: fcfp2 } = await import(join(ROOT, "src", "context.ts"));
+      const metaChatCtx = bcc2(metaStore, "auth", 15);
+      const metaChatMd = fcfp2(metaChatCtx);
+      const contextOk = metaChatMd.includes("Entities:")
+        && metaChatMd.includes("User, Session, Token");
+
+      metaOk = valOk && onboardOk && explainOk && contextOk;
+    } catch (err) {
+      metaOk = false;
+    }
+    results.push({
+      name: "runtime-knowledge-domain-meta",
+      category: "runtime",
+      passed: metaOk,
+      latencyMs: Date.now() - rt23,
+      failureReason: metaOk ? undefined : "KnowledgeMeta/DomainMeta test failed",
+    });
+    features.push({ feature: "knowledge-metadata", status: metaOk ? "present" : "missing", evidence: "KnowledgeMeta + DomainMeta in validation, onboarding, explain, context" });
+
+    // ─── HTTP Integration Tests (Runtime Tests 24-33) ─────────────────────────
+    // Start a temporary Bun.serve() instance and test actual HTTP request/response cycle.
+    let httpServer: any = null;
+    try {
+      // Create a test graph file for the HTTP server
+      const httpGraphPath = join(tmpDir, "http-test-graph.json");
+      writeFileSync(httpGraphPath, JSON.stringify(TEST_GRAPH, null, 2));
+
+      // Import handleRequest directly to avoid full server startup overhead
+      const { handleRequest: hr } = await import(join(ROOT, "src", "routes.ts"));
+      const { GraphStore: GS4 } = await import(join(ROOT, "src", "graph.ts"));
+
+      const httpStore = new GS4(httpGraphPath);
+      httpStore.load();
+
+      // Helper to create a Request object and call handleRequest
+      async function fetchEndpoint(method: string, path: string, body?: unknown): Promise<{ status: number; headers: Record<string, string>; body: any }> {
+        const url = `http://127.0.0.1:3100${path}`;
+        const init: RequestInit = {
+          method,
+          headers: { "Content-Type": "application/json", "X-Forwarded-For": "127.0.0.1" },
+        };
+        if (body) init.body = JSON.stringify(body);
+        const req = new Request(url, init);
+        const resp = await hr(req, httpStore);
+        const headers: Record<string, string> = {};
+        resp.headers.forEach((v: string, k: string) => { headers[k] = v; });
+        let respBody: any = null;
+        try { respBody = await resp.json(); } catch {}
+        return { status: resp.status, headers, body: respBody };
+      }
+
+      // Runtime Test 24: GET /health returns ok
+      const rt24 = Date.now();
+      const healthResp = await fetchEndpoint("GET", "/health");
+      const healthOk = healthResp.status === 200 && healthResp.body?.status === "ok" && typeof healthResp.body?.uptime === "number";
+      results.push({
+        name: "http-health-endpoint",
+        category: "http",
+        passed: healthOk,
+        latencyMs: Date.now() - rt24,
+        failureReason: healthOk ? undefined : `Health: status=${healthResp.status}, body=${JSON.stringify(healthResp.body)?.slice(0, 100)}`,
+      });
+
+      // Runtime Test 25: GET /api/stats returns correct counts
+      const rt25 = Date.now();
+      const statsResp = await fetchEndpoint("GET", "/api/stats");
+      const statsHttpOk = statsResp.status === 200 && statsResp.body?.totalNodes === 5 && statsResp.body?.totalEdges === 5;
+      results.push({
+        name: "http-stats-endpoint",
+        category: "http",
+        passed: statsHttpOk,
+        latencyMs: Date.now() - rt25,
+        failureReason: statsHttpOk ? undefined : `Stats: status=${statsResp.status}, nodes=${statsResp.body?.totalNodes}`,
+      });
+
+      // Runtime Test 26: GET /api/nodes?type=function returns only function nodes
+      const rt26 = Date.now();
+      const nodesResp = await fetchEndpoint("GET", "/api/nodes?type=function");
+      const fnNodesOk = nodesResp.status === 200 && Array.isArray(nodesResp.body?.nodes) && nodesResp.body.nodes.every((n: any) => n.type === "function");
+      results.push({
+        name: "http-nodes-type-filter",
+        category: "http",
+        passed: fnNodesOk,
+        latencyMs: Date.now() - rt26,
+        failureReason: fnNodesOk ? undefined : `Nodes filter: status=${nodesResp.status}, count=${nodesResp.body?.nodes?.length}`,
+      });
+
+      // Runtime Test 27: GET /api/search?q=auth returns results
+      const rt27 = Date.now();
+      const searchResp = await fetchEndpoint("GET", "/api/search?q=auth");
+      const searchHttpOk = searchResp.status === 200 && Array.isArray(searchResp.body?.nodes) && searchResp.body.nodes.length > 0;
+      results.push({
+        name: "http-search-endpoint",
+        category: "http",
+        passed: searchHttpOk,
+        latencyMs: Date.now() - rt27,
+        failureReason: searchHttpOk ? undefined : `Search: status=${searchResp.status}, count=${searchResp.body?.nodes?.length}`,
+      });
+
+      // Runtime Test 28: GET /api/nodes/nonexistent returns 404
+      const rt28 = Date.now();
+      const notFoundResp = await fetchEndpoint("GET", "/api/nodes/nonexistent-node-id");
+      const notFoundOk = notFoundResp.status === 404;
+      results.push({
+        name: "http-node-404",
+        category: "http",
+        passed: notFoundOk,
+        latencyMs: Date.now() - rt28,
+        failureReason: notFoundOk ? undefined : `404: status=${notFoundResp.status}`,
+      });
+
+      // Runtime Test 29: POST /api/chat with missing body returns 400
+      const rt29 = Date.now();
+      const badChatResp = await fetchEndpoint("POST", "/api/chat", {});
+      const badChatOk = badChatResp.status === 400;
+      results.push({
+        name: "http-chat-validation",
+        category: "http",
+        passed: badChatOk,
+        latencyMs: Date.now() - rt29,
+        failureReason: badChatOk ? undefined : `Chat validation: status=${badChatResp.status}`,
+      });
+
+      // Runtime Test 30: GET /api/nonexistent returns 404
+      const rt30 = Date.now();
+      const noRouteResp = await fetchEndpoint("GET", "/api/nonexistent/endpoint");
+      const noRouteOk = noRouteResp.status === 404;
+      results.push({
+        name: "http-unknown-route-404",
+        category: "http",
+        passed: noRouteOk,
+        latencyMs: Date.now() - rt30,
+        failureReason: noRouteOk ? undefined : `Unknown route: status=${noRouteResp.status}`,
+      });
+
+      // Runtime Test 31: OPTIONS request returns CORS headers
+      const rt31 = Date.now();
+      const corsResp = await fetchEndpoint("OPTIONS", "/api/stats");
+      const corsOk = corsResp.status === 200
+        && corsResp.headers["access-control-allow-origin"] === "*"
+        && corsResp.headers["access-control-allow-methods"]?.includes("GET");
+      results.push({
+        name: "http-cors-headers",
+        category: "http",
+        passed: corsOk,
+        latencyMs: Date.now() - rt31,
+        failureReason: corsOk ? undefined : `CORS: status=${corsResp.status}, allow-origin=${corsResp.headers["access-control-allow-origin"]}`,
+      });
+
+      // Runtime Test 32: Verify X-Request-Id and X-Response-Time headers are present
+      const rt32 = Date.now();
+      const headerResp = await fetchEndpoint("GET", "/api/stats");
+      const headerOk = typeof headerResp.headers["x-request-id"] === "string" && headerResp.headers["x-request-id"].length > 0
+        && typeof headerResp.headers["x-response-time"] === "string";
+      results.push({
+        name: "http-middleware-headers",
+        category: "http",
+        passed: headerOk,
+        latencyMs: Date.now() - rt32,
+        failureReason: headerOk ? undefined : `Headers: requestId=${headerResp.headers["x-request-id"]}, responseTime=${headerResp.headers["x-response-time"]}`,
+      });
+
+      // Runtime Test 33: GET /api/validate returns validation results
+      const rt33 = Date.now();
+      const validateResp = await fetchEndpoint("GET", "/api/validate");
+      const validateHttpOk = validateResp.status === 200 && typeof validateResp.body?.valid === "boolean" && typeof validateResp.body?.totalIssues === "number";
+      results.push({
+        name: "http-validate-endpoint",
+        category: "http",
+        passed: validateHttpOk,
+        latencyMs: Date.now() - rt33,
+        failureReason: validateHttpOk ? undefined : `Validate: status=${validateResp.status}, valid=${validateResp.body?.valid}`,
+      });
+
+      features.push({ feature: "http-integration-tests", status: "present", evidence: "10 HTTP endpoint tests covering health, stats, nodes, search, 404, validation, CORS, headers" });
+    } catch (err) {
+      results.push({
+        name: "http-integration-tests",
+        category: "http",
+        passed: false,
+        latencyMs: 0,
+        failureReason: `HTTP integration tests failed: ${(err as Error).message}`,
+      });
+    }
+
     // Cleanup temp directory
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   } catch (err) {
