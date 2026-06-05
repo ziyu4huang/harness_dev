@@ -583,6 +583,33 @@ const IMPROVEMENT_RESULT_SCHEMA = {
   required: ['bunAppChanges', 'workflowChanges', 'testsAdded', 'featuresAdded', 'summary'],
 }
 
+const BUILD_SCHEMA = {
+  type: 'object',
+  properties: {
+    success: { type: 'boolean' },
+    bundleSizeKB: { type: 'number' },
+    qualityScore: { type: 'number' },
+  },
+  required: ['success', 'bundleSizeKB', 'qualityScore'],
+}
+
+const REGRESSION_SCHEMA = {
+  type: 'object',
+  properties: {
+    overallPassed: { type: 'boolean' },
+    previousBundleSizeKB: { type: 'number' },
+    newBundleSizeKB: { type: 'number' },
+    bundleSizeDeltaKB: { type: 'number' },
+    qualityScore: { type: 'number' },
+    benchmarkPassed: { type: 'number' },
+    benchmarkTotal: { type: 'number' },
+    regressionCount: { type: 'number' },
+    regressions: { type: 'array', items: { type: 'string' } },
+    verdict: { type: 'string' },
+  },
+  required: ['overallPassed', 'newBundleSizeKB', 'qualityScore', 'verdict'],
+}
+
 const REPORT_SCHEMA = {
   type: 'object',
   properties: {
@@ -735,21 +762,15 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     Step 3: Verify:
     Bash("if (Test-Path '${BUNDLE_PATH}') { (Get-Item '${BUNDLE_PATH}').Length / 1KB } else { 'MISSING' }")
 
-    Step 4: Run quality-check:
-    Bash("cd ${APP_DIR} && bun run quality-check 2>&1")
+    Step 4: Run quality-check with --json:
+    Bash("cd ${APP_DIR} && bun run quality-check --json 2>&1")
 
     Return JSON: { success, bundleSizeKB, qualityScore }`,
-    { label: `build-${iteration}`, phase: 'Build', model: 'sonnet' },
+    { label: `build-${iteration}`, phase: 'Build', model: 'sonnet', schema: BUILD_SCHEMA },
   )
 
-  let buildBundleKB = 0
-  try {
-    const buildJson = JSON.parse(buildResult || '{}')
-    buildBundleKB = buildJson.bundleSizeKB || 0
-  } catch {
-    const sizeMatch = (buildResult || '').match(/(\d+\.?\d*)\s*KB/)
-    if (sizeMatch) buildBundleKB = parseFloat(sizeMatch[1])
-  }
+  let buildBundleKB = buildResult?.bundleSizeKB || 0
+  const buildQualityScore = buildResult?.qualityScore || 0
   log(`[${iteration}] Build complete: ${buildBundleKB.toFixed(1)} KB`)
 
   // ====================================================================
@@ -1028,7 +1049,9 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   const bunAppChanges = improvements?.bunAppChanges?.length || 0
   const workflowChanges = improvements?.workflowChanges?.length || 0
   const scriptChanges = improvements?.scriptChanges?.length || 0
+  const filesChanged = improvements?.bunAppChanges?.filter(c => c.status === 'applied').map(c => c.file) || []
   log(`[${iteration}] Improvements: ${bunAppChanges} app + ${workflowChanges} workflow + ${scriptChanges} script changes`)
+  log(`[${iteration}] Files changed: ${filesChanged.length > 0 ? filesChanged.join(', ') : '(none)'}`)
 
   // ====================================================================
   // PHASE 7: Regression
@@ -1051,15 +1074,18 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     Step 3: Benchmark
     Bash("cd ${APP_DIR} && bun run benchmark --json 2>&1")
 
-    Step 4: Compare to previous metrics
-    Previous: Bundle ${buildBundleKB.toFixed(1)} KB, Tests ${passedTests}/${totalTests}
+    Step 4: Verify TypeScript parses for each modified file
+    Bash("cd ${APP_DIR} && bun build --no-bundle src/index.ts 2>&1")
 
-    Return JSON: { overallPassed, previousBundleSizeKB, newBundleSizeKB, bundleSizeDeltaKB, qualityScore, benchmarkPassed, benchmarkTotal, regressionCount, regressions: [], verdict }`,
-    { label: `regression-${iteration}`, phase: 'Regression', model: 'sonnet' },
+    Step 5: Compare to previous metrics
+    Previous: Bundle ${buildBundleKB.toFixed(1)} KB, Tests ${passedTests}/${totalTests}
+    Files changed in this iteration: ${filesChanged.join(', ') || '(none)'}
+
+    Return JSON: { overallPassed, previousBundleSizeKB, newBundleSizeKB, bundleSizeDeltaKB, qualityScore, benchmarkPassed, benchmarkTotal, regressionCount, regressions: [], verdict, filesChecked: ${JSON.stringify(filesChanged)} }`,
+    { label: `regression-${iteration}`, phase: 'Regression', model: 'sonnet', schema: REGRESSION_SCHEMA },
   )
 
-  let regressionData = {}
-  try { regressionData = JSON.parse(regression || '{}') } catch {}
+  const regressionData = regression || {}
 
   const prevKB = regressionData.previousBundleSizeKB || buildBundleKB
   const newKB = regressionData.newBundleSizeKB || buildBundleKB
@@ -1079,12 +1105,15 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   // ====================================================================
   phase('Report')
 
+  // Count remaining high-priority gaps before building iteration record
+  const remainingHighGaps = gaps.filter(g => g.priority === 'high').length
+
   log(`[${iteration}] Generating report...`)
 
   const report = await agent(
     `Generate summary report for iteration ${iteration}.
 
-    Quality: ${qualityScoreAfter}/100
+    Quality: ${buildQualityScore} → ${qualityScoreAfter}/100
     Bundle: ${prevKB.toFixed(1)} → ${newKB.toFixed(1)} KB
     Improvements: ${bunAppChanges} app + ${workflowChanges} workflow
     Regression verdict: ${regressionVerdict}, count: ${regressionCount}
@@ -1109,6 +1138,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     workflowImprovements: workflowChanges,
     remainingGaps: gaps.length,
     highPriorityGaps: remainingHighGaps,
+    filesChanged,
   }
   previousMetrics = iterationRecord
   runIterations.push(iterationRecord)
@@ -1118,6 +1148,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   log(`  Quality: ${report?.qualityScore?.before || '?'} → ${report?.qualityScore?.after || '?'} (Δ${report?.qualityScore?.delta >= 0 ? '+' : ''}${report?.qualityScore?.delta || '?'})`)
   log(`  Bundle:  ${report?.bundleSize?.beforeKB?.toFixed(1) || '?'} → ${report?.bundleSize?.afterKB?.toFixed(1) || '?'} KB`)
   log(`  App: ${bunAppChanges} changes, Workflow: ${workflowChanges} changes`)
+  log(`  Files modified: ${filesChanged.length > 0 ? filesChanged.join(', ') : '(none)'}`)
   log(`  Verdict: ${report?.overallVerdict || 'unknown'}`)
   log(`${'─'.repeat(60)}\n`)
 
@@ -1125,8 +1156,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   const totalChanges = bunAppChanges + workflowChanges + scriptChanges
   const qualityDelta = Math.abs(report?.qualityScore?.delta || 0)
 
-  // Count remaining high-priority gaps that haven't been addressed
-  const remainingHighGaps = gaps.filter(g => g.priority === 'high').length
+  // remainingHighGaps is computed above, before the iteration record
 
   if (totalChanges === 0 && remainingHighGaps === 0) {
     consecutiveLowDelta++
