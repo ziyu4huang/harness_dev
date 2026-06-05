@@ -6,12 +6,17 @@
   "type": "module",
   "scripts": {
     "dev": "bun src/index.ts",
-    "build": "mkdir -p _tmpout && bun build src/index.ts --outdir _tmpout --target bun --minify --sourcemap=external && cp _tmpout/index.js ../../dist/learning-anything-server.js && cp _tmpout/index.js.map ../../dist/learning-anything-server.js.map && rm -rf _tmpout",
-    "start": "bun dist/learning-anything-server.js",
+    "build": "mkdir -p _tmpout && bun build src/index.ts --outdir _tmpout --target bun --minify --sourcemap=external && cp _tmpout/index.js ../../dist/learning-anything.js && cp _tmpout/index.js.map ../../dist/learning-anything.js.map && rm -rf _tmpout",
+    "start": "bun dist/learning-anything.js",
     "test": "bun test",
     "audit": "bun scripts/audit.ts",
     "quality-check": "bun scripts/quality-check.ts",
     "benchmark": "bun scripts/benchmark.ts"
   },
-  "dependencies": {}
+  "dependencies": {
+    "ai": "^4.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "fuse.js": "^7.0.0",
+    "zod": "^3.23.0"
+  }
 }

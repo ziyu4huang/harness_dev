@@ -24,6 +24,9 @@ import type { GraphStore } from "./graph.js";
 import { getEnv, LIMITS } from "./config.js";
 import * as agent from "./agent.js";
 import type { AgentMessage } from "./agent.js";
+import { validateGraph } from "./validate.js";
+import { requestLogger, logResponse, rateLimiter, classifyError } from "./middleware.js";
+import { createIgnoreFilter } from "./ignore.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -85,7 +88,12 @@ const GET_ROUTES: Record<string, Handler> = {
     const query = q.get("q");
     if (!query) return error("Missing query parameter: q");
     const limit = parseInt(q.get("limit") ?? "50", 10);
-    const nodes = gs.search(query, limit);
+    const useIgnoreFilter = q.get("ignored") !== "false";
+    let nodes = gs.search(query, limit);
+    if (useIgnoreFilter) {
+      const filter = createIgnoreFilter();
+      nodes = nodes.filter(n => !n.filePath || !filter.isIgnored(n.filePath));
+    }
     return json({ query, nodes, count: nodes.length });
   },
 
@@ -119,6 +127,24 @@ const GET_ROUTES: Record<string, Handler> = {
     if (!path) return error("Missing query parameter: path");
     const result = await agent.explainNode(path, gs);
     return json(result);
+  },
+
+  "api/validate": async (_s, _q, _b, gs) => {
+    gs.ensureLoaded();
+    const issues = gs.validationIssues;
+    const isValid = issues.filter(i => i.level === "dropped" || i.level === "fatal").length === 0;
+    return json({
+      valid: isValid,
+      totalIssues: issues.length,
+      autoCorrected: issues.filter(i => i.level === "auto-corrected").length,
+      dropped: issues.filter(i => i.level === "dropped").length,
+      issues: issues.map(i => ({
+        level: i.level,
+        category: i.category,
+        message: i.message,
+        path: i.path,
+      })),
+    });
   },
 };
 
@@ -227,6 +253,21 @@ const POST_ROUTES: Record<string, Handler> = {
     return json(result);
   },
 
+  "api/analyze/file": async (_s, _q, body, gs) => {
+    const { filePath, content, model } = body as { filePath: string; content: string; model?: string };
+    if (!filePath) return error("Missing filePath parameter");
+    if (!content) return error("Missing content parameter");
+    const result = await agent.analyzeFile(filePath, content, gs, model ?? "pro");
+    return json(result);
+  },
+
+  "api/analyze/project-summary": async (_s, _q, body, gs) => {
+    gs.ensureLoaded();
+    const { model } = body as { model?: string };
+    const result = await agent.summarizeProject(gs, model ?? "pro");
+    return json(result);
+  },
+
   "api/graph/reload": async (_s, _q, _b, gs) => {
     try {
       gs.load();
@@ -237,6 +278,14 @@ const POST_ROUTES: Record<string, Handler> = {
   },
 };
 
+// ─── Rate Limiter Instance ───────────────────────────────────────────────────
+
+const env = getEnv();
+const limiter = rateLimiter({
+  maxRequests: env.rateLimitMax,
+  windowMs: env.rateLimitWindowMs,
+});
+
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 export async function handleRequest(
@@ -245,6 +294,12 @@ export async function handleRequest(
 ): Promise<Response> {
   const { segments, query } = parsePath(request.url);
   const method = request.method;
+  const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    ?? request.headers.get("x-real-ip")
+    ?? "unknown";
+
+  // Middleware: request logging
+  const ctx = requestLogger(method, segments.join("/"), clientIp);
 
   // CORS
   if (method === "OPTIONS") {
@@ -257,49 +312,94 @@ export async function handleRequest(
     });
   }
 
-  const corsHeaders = {
+  const corsHeaders: Record<string, string> = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "X-Request-Id": ctx.requestId,
   };
 
+  // Middleware: rate limiting
+  const rateResult = limiter.check(clientIp);
+  corsHeaders["X-RateLimit-Remaining"] = String(rateResult.remaining);
+  corsHeaders["X-RateLimit-Reset"] = String(rateResult.resetAt);
+
+  if (!rateResult.allowed) {
+    logResponse(ctx, 429);
+    return new Response(
+      JSON.stringify({ error: "Rate limit exceeded. Please retry later.", code: "RATE_LIMITED" }),
+      { status: 429, headers: { "Content-Type": "application/json", ...corsHeaders } },
+    );
+  }
+
   try {
+    let resp: Response;
+
     if (method === "GET") {
       const pathKey = segments.join("/");
 
       // Try static routes first
       const handler = GET_ROUTES[pathKey];
       if (handler) {
-        const resp = await handler(segments, query, null, graphStore);
-        return new Response(resp.body, { status: resp.status, headers: { ...Object.fromEntries(resp.headers), ...corsHeaders } });
+        resp = await handler(segments, query, null, graphStore);
+      } else {
+        // Try dynamic routes
+        const dynamicResp = await handleDynamicGet(segments, query, graphStore);
+        if (dynamicResp) {
+          resp = dynamicResp;
+        } else {
+          resp = error("Not found", 404);
+        }
       }
-
-      // Try dynamic routes
-      const dynamicResp = await handleDynamicGet(segments, query, graphStore);
-      if (dynamicResp) {
-        return new Response(dynamicResp.body, { status: dynamicResp.status, headers: { ...Object.fromEntries(dynamicResp.headers), ...corsHeaders } });
-      }
-
-      return error("Not found", 404);
-    }
-
-    if (method === "POST") {
+    } else if (method === "POST") {
       const pathKey = segments.join("/");
       const handler = POST_ROUTES[pathKey];
-      if (!handler) return error("Not found", 404);
-
-      let body: unknown = null;
-      const contentType = request.headers.get("content-type") ?? "";
-      if (contentType.includes("application/json")) {
-        body = await request.json();
+      if (!handler) {
+        resp = error("Not found", 404);
+      } else {
+        let body: unknown = null;
+        const contentType = request.headers.get("content-type") ?? "";
+        if (contentType.includes("application/json")) {
+          body = await request.json();
+        }
+        resp = await handler(segments, query, body, graphStore);
       }
-
-      const resp = await handler(segments, query, body, graphStore);
-      return new Response(resp.body, { status: resp.status, headers: { ...Object.fromEntries(resp.headers), ...corsHeaders } });
+    } else {
+      resp = error("Method not allowed", 405);
     }
 
-    return error("Method not allowed", 405);
+    // Add middleware headers to response
+    const elapsed = Date.now() - ctx.startTime;
+    const mergedHeaders: Record<string, string> = {
+      ...Object.fromEntries(resp.headers),
+      ...corsHeaders,
+      "X-Response-Time": `${elapsed}ms`,
+    };
+
+    logResponse(ctx, resp.status);
+
+    return new Response(resp.body, {
+      status: resp.status,
+      headers: mergedHeaders,
+    });
   } catch (err) {
-    console.error(`Error handling ${method} ${request.url}:`, err);
-    return error(`Internal error: ${(err as Error).message}`, 500);
+    const errInfo = classifyError(err);
+    const elapsed = Date.now() - ctx.startTime;
+    logResponse(ctx, errInfo.status);
+
+    return new Response(
+      JSON.stringify({
+        error: errInfo.message,
+        code: errInfo.code,
+        requestId: ctx.requestId,
+      }),
+      {
+        status: errInfo.status,
+        headers: {
+          "Content-Type": "application/json",
+          ...corsHeaders,
+          "X-Response-Time": `${elapsed}ms`,
+        },
+      },
+    );
   }
 }

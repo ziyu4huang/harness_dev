@@ -24,6 +24,13 @@ import { buildChatContext, formatContextForPrompt } from "./context.js";
 import { buildExplainContext, formatExplainPrompt } from "./explain.js";
 import { buildDiffContext, formatDiffAnalysis } from "./diff.js";
 import { buildOnboardingGuide } from "./onboard.js";
+import {
+  buildFileAnalysisPrompt,
+  buildProjectSummaryPrompt,
+  buildProjectContextFromGraph,
+  type LLMFileAnalysis,
+  type LLMProjectSummary,
+} from "./analyzer.js";
 import { z } from "zod";
 
 // ─── Provider Setup ──────────────────────────────────────────────────────────
@@ -403,5 +410,117 @@ export async function analyzeDiff(
  */
 export function generateOnboardingGuide(graphStore: GraphStore): string {
   return buildOnboardingGuide(graphStore);
+}
+
+/**
+ * Analyze a single file using LLM — uses pro model for depth.
+ * Returns structured analysis with summary, tags, complexity, function/class summaries.
+ */
+export async function analyzeFile(
+  filePath: string,
+  content: string,
+  graphStore?: GraphStore,
+  modelKey: string = "pro",
+): Promise<LLMFileAnalysis & { model: string; usage?: { promptTokens: number; completionTokens: number } }> {
+  const modelId = resolveModelId(modelKey);
+  const model = provider()(modelId);
+  const params = getModelParams(modelKey);
+
+  // Build project context from graph if available
+  let projectContext = "No project context available.";
+  if (graphStore?.loaded) {
+    const graph = graphStore.data;
+    projectContext = buildProjectContextFromGraph(
+      graph.nodes, graph.edges, graph.project.name,
+    );
+  }
+
+  const prompt = buildFileAnalysisPrompt(filePath, content, projectContext);
+
+  const result = await generateObject({
+    model,
+    system: SYSTEM_PROMPTS.fileAnalyst,
+    prompt,
+    schema: z.object({
+      fileSummary: z.string().describe("Concise summary of the file"),
+      tags: z.array(z.string()).describe("Relevant tags"),
+      complexity: z.enum(["simple", "moderate", "complex"]).describe("Complexity assessment"),
+      functionSummaries: z.record(z.string(), z.string()).describe("Function name to summary map"),
+      classSummaries: z.record(z.string(), z.string()).describe("Class name to summary map"),
+      languageNotes: z.string().optional().describe("Language-specific notes"),
+    }),
+    maxTokens: params.maxTokens,
+    temperature: Math.min(params.temperature, 0.2),
+  });
+
+  return {
+    ...result.object,
+    model: modelId,
+    usage: result.usage ? {
+      promptTokens: result.usage.promptTokens,
+      completionTokens: result.usage.completionTokens,
+    } : undefined,
+  };
+}
+
+/**
+ * Generate a project-level summary using LLM — uses pro model.
+ * Analyzes the project structure from the knowledge graph and produces
+ * a comprehensive description, framework detection, and layer mapping.
+ */
+export async function summarizeProject(
+  graphStore: GraphStore,
+  modelKey: string = "pro",
+): Promise<LLMProjectSummary & { model: string; usage?: { promptTokens: number; completionTokens: number } }> {
+  const modelId = resolveModelId(modelKey);
+  const model = provider()(modelId);
+  const params = getModelParams(modelKey);
+
+  const graph = graphStore.data;
+
+  // Build file list from graph nodes
+  const fileList = graph.nodes
+    .filter(n => n.filePath)
+    .map(n => n.filePath!)
+    .sort();
+
+  // Build sample files from nodes that have file paths
+  const sampleFiles: Array<{ path: string; content: string }> = [];
+  // Use node summaries as stand-ins for actual file content
+  const fileNodes = graph.nodes.filter(n => n.filePath).slice(0, 10);
+  for (const node of fileNodes) {
+    sampleFiles.push({
+      path: node.filePath!,
+      content: `// ${node.summary}\n// Type: ${node.type}, Complexity: ${node.complexity ?? "unknown"}\n// Tags: ${node.tags.join(", ")}`,
+    });
+  }
+
+  const prompt = buildProjectSummaryPrompt(fileList, sampleFiles);
+
+  const result = await generateObject({
+    model,
+    system: SYSTEM_PROMPTS.projectSummarizer,
+    prompt,
+    schema: z.object({
+      description: z.string().describe("Project description (2-3 sentences)"),
+      frameworks: z.array(z.string()).describe("Detected frameworks and libraries"),
+      layers: z.array(z.object({
+        name: z.string().describe("Layer name"),
+        description: z.string().describe("Layer responsibility"),
+        filePatterns: z.array(z.string()).describe("File patterns for this layer"),
+      })).describe("Architectural layers"),
+    }),
+    maxTokens: params.maxTokens,
+    temperature: Math.min(params.temperature, 0.2),
+  });
+
+  return {
+    ...result.object,
+    model: modelId,
+    usage: result.usage ? {
+      promptTokens: result.usage.promptTokens,
+      completionTokens: result.usage.completionTokens,
+    } : undefined,
+  };
 }
 

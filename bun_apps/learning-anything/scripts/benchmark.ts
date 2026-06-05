@@ -13,7 +13,7 @@ import { join } from "path";
 
 const ROOT = import.meta.dir.replace(/[/\\]scripts$/, "");
 const DIST = join(ROOT, "..", "..", "dist");
-const BUNDLE = join(DIST, "learning-anything-server.js");
+const BUNDLE = join(DIST, "learning-anything.js");
 const isJson = process.argv.includes("--json");
 
 interface BenchmarkResult {
@@ -51,7 +51,7 @@ async function benchmark(): Promise<BenchmarkReport> {
     category: "build",
     passed: bundleExists,
     latencyMs: Date.now() - t1,
-    failureReason: bundleExists ? undefined : "Bundle not found at dist/learning-anything-server.js",
+    failureReason: bundleExists ? undefined : "Bundle not found at dist/learning-anything.js",
   });
 
   // Test 2: Bundle has shebang
@@ -166,7 +166,7 @@ async function benchmark(): Promise<BenchmarkReport> {
   // Test 9: Build script targets correct output
   const t9 = Date.now();
   const buildScript = pkg.scripts?.build ?? "";
-  const buildValid = buildScript.includes("learning-anything-server.js") && buildScript.includes("../../dist/");
+  const buildValid = buildScript.includes("learning-anything.js") && buildScript.includes("../../dist/");
   results.push({
     name: "build-script",
     category: "build",
@@ -286,7 +286,7 @@ async function benchmark(): Promise<BenchmarkReport> {
   // Test 16: Type imports use .js extension (Bun ESM requirement)
   const t11 = Date.now();
   let importStyleValid = true;
-  const allModulesToCheck = [graphModule, agentModule, routesModule, join(ROOT, "src", "context.ts"), join(ROOT, "src", "explain.ts"), join(ROOT, "src", "diff.ts"), join(ROOT, "src", "onboard.ts")];
+  const allModulesToCheck = [graphModule, agentModule, routesModule, join(ROOT, "src", "context.ts"), join(ROOT, "src", "explain.ts"), join(ROOT, "src", "diff.ts"), join(ROOT, "src", "onboard.ts"), join(ROOT, "src", "validate.ts"), join(ROOT, "src", "search.ts")];
   for (const srcFile of allModulesToCheck.filter(existsSync)) {
     const content = readFileSync(srcFile, "utf-8");
     const jsImports = content.match(/from\s+['"]\.\/[^'"]+['"]/g) ?? [];
@@ -300,6 +300,337 @@ async function benchmark(): Promise<BenchmarkReport> {
     latencyMs: Date.now() - t11,
     failureReason: importStyleValid ? undefined : "Some imports missing .js extension for Bun ESM",
   });
+
+  // ─── Runtime Behavioral Tests ────────────────────────────────────────────
+  // These tests actually import and execute the server code to verify runtime
+  // behavior, not just structural presence.
+
+  try {
+    // Create a temporary test graph for runtime tests
+    const tmpDir = join(ROOT, "__tmp_bench__");
+    const { mkdirSync, writeFileSync, rmSync } = await import("fs");
+    mkdirSync(tmpDir, { recursive: true });
+
+    const TEST_GRAPH = {
+      version: "1.0.0",
+      kind: "codebase",
+      project: {
+        name: "bench-test",
+        languages: ["typescript"],
+        frameworks: ["bun"],
+        description: "Benchmark test graph",
+        analyzedAt: "2025-01-01",
+        gitCommitHash: "abc123",
+      },
+      nodes: [
+        { id: "file:a.ts", type: "file", name: "a.ts", filePath: "a.ts", summary: "Module A with authentication", tags: ["auth", "core"], complexity: "simple" },
+        { id: "fn:a.ts:login", type: "function", name: "login", filePath: "a.ts", summary: "Login handler", tags: ["auth"], complexity: "moderate" },
+        { id: "file:b.ts", type: "file", name: "b.ts", filePath: "b.ts", summary: "Module B with database access", tags: ["database", "core"], complexity: "complex" },
+        { id: "fn:b.ts:query", type: "function", name: "query", filePath: "b.ts", summary: "Database query executor", tags: ["database"], complexity: "complex" },
+        { id: "class:c.ts:App", type: "class", name: "App", filePath: "c.ts", summary: "Main application class", tags: ["app"], complexity: "moderate" },
+      ],
+      edges: [
+        { source: "file:a.ts", target: "fn:a.ts:login", type: "contains" },
+        { source: "file:b.ts", target: "fn:b.ts:query", type: "contains" },
+        { source: "fn:a.ts:login", target: "fn:b.ts:query", type: "calls" },
+        { source: "class:c.ts:App", target: "file:a.ts", type: "depends_on" },
+        { source: "class:c.ts:App", target: "file:b.ts", type: "depends_on" },
+      ],
+      layers: [
+        { id: "core", name: "Core", description: "Core modules", nodeIds: ["file:a.ts", "fn:a.ts:login", "file:b.ts", "fn:b.ts:query"] },
+        { id: "app", name: "Application", description: "Application layer", nodeIds: ["class:c.ts:App"] },
+      ],
+      tour: [
+        { order: 1, title: "Start", description: "Start here", nodeIds: ["file:a.ts"] },
+      ],
+    };
+
+    const graphPath = join(tmpDir, "test-graph.json");
+    writeFileSync(graphPath, JSON.stringify(TEST_GRAPH, null, 2));
+
+    // Import GraphStore dynamically
+    const { GraphStore } = await import(join(ROOT, "src", "graph.ts"));
+    const store = new GraphStore(graphPath);
+    store.load();
+
+    // Runtime Test 1: GraphStore loads and has correct stats
+    const rt1 = Date.now();
+    const stats = store.getStats();
+    const statsOk = stats.totalNodes === 5 && stats.totalEdges === 5 && stats.layers === 2;
+    results.push({
+      name: "runtime-graph-stats",
+      category: "runtime",
+      passed: statsOk,
+      latencyMs: Date.now() - rt1,
+      failureReason: statsOk ? undefined : `Stats mismatch: nodes=${stats.totalNodes}, edges=${stats.totalEdges}`,
+    });
+
+    // Runtime Test 2: getNode returns correct node
+    const rt2 = Date.now();
+    const node = store.getNode("file:a.ts");
+    const getNodeOk = node?.name === "a.ts" && node?.type === "file";
+    results.push({
+      name: "runtime-get-node",
+      category: "runtime",
+      passed: getNodeOk,
+      latencyMs: Date.now() - rt2,
+      failureReason: getNodeOk ? undefined : `getNode returned wrong data: ${JSON.stringify(node?.name)}`,
+    });
+
+    // Runtime Test 3: search finds relevant nodes
+    const rt3 = Date.now();
+    const searchResults = store.search("auth", 10);
+    const searchOk = searchResults.length > 0 && searchResults.some(n => n.name === "a.ts" || n.name === "login");
+    results.push({
+      name: "runtime-search",
+      category: "runtime",
+      passed: searchOk,
+      latencyMs: Date.now() - rt3,
+      failureReason: searchOk ? undefined : `Search for 'auth' returned ${searchResults.length} results`,
+    });
+    features.push({ feature: "fuzzy-search", status: searchOk ? "present" : "missing", evidence: `fuse.js search returned ${searchResults.length} results for 'auth'` });
+
+    // Runtime Test 4: getNeighborhood returns 1-hop neighbors
+    const rt4 = Date.now();
+    const { nodes: nbrNodes, edges: nbrEdges } = store.getNeighborhood("file:a.ts", 20);
+    const nbrOk = nbrNodes.length > 1 && nbrEdges.length > 0;
+    results.push({
+      name: "runtime-neighborhood",
+      category: "runtime",
+      passed: nbrOk,
+      latencyMs: Date.now() - rt4,
+      failureReason: nbrOk ? undefined : `Neighborhood returned ${nbrNodes.length} nodes, ${nbrEdges.length} edges`,
+    });
+
+    // Runtime Test 5: getDependencyTree follows chains
+    const rt5 = Date.now();
+    const { nodes: depNodes } = store.getDependencyTree("fn:a.ts:login", 3);
+    const depOk = depNodes.length > 0 && depNodes.some(n => n.name === "query");
+    results.push({
+      name: "runtime-dep-tree",
+      category: "runtime",
+      passed: depOk,
+      latencyMs: Date.now() - rt5,
+      failureReason: depOk ? undefined : `Dep tree from login: ${depNodes.map(n => n.name).join(", ")}`,
+    });
+
+    // Runtime Test 6: getPathBetween finds paths
+    const rt6 = Date.now();
+    const { nodes: pathNodes } = store.getPathBetween("class:c.ts:App", "fn:b.ts:query");
+    const pathOk = pathNodes.length > 0;
+    results.push({
+      name: "runtime-path-between",
+      category: "runtime",
+      passed: pathOk,
+      latencyMs: Date.now() - rt6,
+      failureReason: pathOk ? undefined : `Path App->query: nodes=${pathNodes.length}`,
+    });
+
+    // Runtime Test 7: getLayerHealth returns metrics
+    const rt7 = Date.now();
+    const layerHealth = store.getLayerHealth();
+    const lhOk = layerHealth.length === 2 && layerHealth.every(l => typeof l.edgeDensity === "number");
+    results.push({
+      name: "runtime-layer-health",
+      category: "runtime",
+      passed: lhOk,
+      latencyMs: Date.now() - rt7,
+      failureReason: lhOk ? undefined : `Layer health: ${layerHealth.length} layers`,
+    });
+
+    // Runtime Test 8: getHotspots returns complex nodes
+    const rt8 = Date.now();
+    const hotspots = store.getHotspots();
+    const hotOk = hotspots.length > 0 && hotspots.every(n => n.complexity === "complex");
+    results.push({
+      name: "runtime-hotspots",
+      category: "runtime",
+      passed: hotOk,
+      latencyMs: Date.now() - rt8,
+      failureReason: hotOk ? undefined : `Hotspots: ${hotspots.map(n => n.name).join(", ")}`,
+    });
+
+    // Runtime Test 9: buildChatContext produces valid context
+    const rt9 = Date.now();
+    const { buildChatContext: bcc, formatContextForPrompt: fcfp } = await import(join(ROOT, "src", "context.ts"));
+    const chatCtx = bcc(store, "auth", 15);
+    const chatMd = fcfp(chatCtx);
+    const chatOk = chatCtx.relevantNodes.length > 0 && chatMd.includes("# Project:");
+    results.push({
+      name: "runtime-chat-context",
+      category: "runtime",
+      passed: chatOk,
+      latencyMs: Date.now() - rt9,
+      failureReason: chatOk ? undefined : `Chat context: ${chatCtx.relevantNodes.length} nodes`,
+    });
+
+    // Runtime Test 10: buildOnboardingGuide produces markdown
+    const rt10 = Date.now();
+    const { buildOnboardingGuide: bog } = await import(join(ROOT, "src", "onboard.ts"));
+    const guide = bog(store);
+    const guideOk = guide.includes("# bench-test") && guide.includes("## Architecture");
+    results.push({
+      name: "runtime-onboarding-guide",
+      category: "runtime",
+      passed: guideOk,
+      latencyMs: Date.now() - rt10,
+      failureReason: guideOk ? undefined : "Onboarding guide missing expected sections",
+    });
+
+    // Runtime Test 11: validateGraph passes for valid graph
+    const rt11 = Date.now();
+    const { validateGraph: vg } = await import(join(ROOT, "src", "validate.ts"));
+    const valResult = vg(TEST_GRAPH);
+    const valOk = valResult.success && valResult.data!.nodes.length === 5;
+    results.push({
+      name: "runtime-validate-valid",
+      category: "runtime",
+      passed: valOk,
+      latencyMs: Date.now() - rt11,
+      failureReason: valOk ? undefined : `Validation: success=${valResult.success}, nodes=${valResult.data?.nodes.length}`,
+    });
+    features.push({ feature: "graph-validation", status: valOk ? "present" : "missing", evidence: "validate.ts 4-tier pipeline" });
+
+    // Runtime Test 12: validateGraph rejects malformed graph
+    const rt12 = Date.now();
+    const badResult = vg({ nodes: [] });
+    const badOk = !badResult.success;
+    results.push({
+      name: "runtime-validate-rejects-bad",
+      category: "runtime",
+      passed: badOk,
+      latencyMs: Date.now() - rt12,
+      failureReason: badOk ? undefined : "Validation should reject empty graph",
+    });
+
+    // Runtime Test 13: buildExplainContext and formatExplainPrompt
+    const rt13 = Date.now();
+    const { buildExplainContext: bec, formatExplainPrompt: fep } = await import(join(ROOT, "src", "explain.ts"));
+    const explainCtx = bec(store, "a.ts");
+    const explainPrompt = fep(explainCtx);
+    const explainOk = explainCtx.targetNode !== null && explainCtx.childNodes.length > 0 && explainPrompt.includes("# Deep Dive:");
+    results.push({
+      name: "runtime-explain-builder",
+      category: "runtime",
+      passed: explainOk,
+      latencyMs: Date.now() - rt13,
+      failureReason: explainOk ? undefined : `Explain context: targetNode=${!!explainCtx.targetNode}, children=${explainCtx.childNodes.length}`,
+    });
+    features.push({ feature: "explain-builder", status: explainOk ? "present" : "missing", evidence: `buildExplainContext + formatExplainPrompt for a.ts` });
+
+    // Runtime Test 14: buildDiffContext and formatDiffAnalysis
+    const rt14 = Date.now();
+    const { buildDiffContext: bdc, formatDiffAnalysis: fda } = await import(join(ROOT, "src", "diff.ts"));
+    const diffCtx = bdc(store, ["a.ts"]);
+    const diffAnalysis = fda(diffCtx);
+    const diffOk = diffCtx.changedNodes.length > 0 && diffCtx.affectedNodes.length > 0 && diffAnalysis.includes("# Diff Analysis:");
+    results.push({
+      name: "runtime-diff-builder",
+      category: "runtime",
+      passed: diffOk,
+      latencyMs: Date.now() - rt14,
+      failureReason: diffOk ? undefined : `Diff: changed=${diffCtx.changedNodes.length}, affected=${diffCtx.affectedNodes.length}`,
+    });
+    features.push({ feature: "diff-builder", status: diffOk ? "present" : "missing", evidence: `buildDiffContext + formatDiffAnalysis for a.ts` });
+
+    // Runtime Test 15: search type filtering
+    const rt15 = Date.now();
+    const { SearchEngine: SE } = await import(join(ROOT, "src", "search.ts"));
+    const se = new SE(TEST_GRAPH.nodes);
+    const allResults = se.search("auth", { limit: 10 });
+    const fnResults = se.search("auth", { limit: 10, types: ["function"] });
+    const fnOnlyOk = fnResults.length > 0 && fnResults.every(r => {
+      const node = TEST_GRAPH.nodes.find(n => n.id === r.nodeId);
+      return node?.type === "function";
+    });
+    results.push({
+      name: "runtime-search-type-filter",
+      category: "runtime",
+      passed: fnOnlyOk,
+      latencyMs: Date.now() - rt15,
+      failureReason: fnOnlyOk ? undefined : `Type filter: all=${allResults.length}, fn=${fnResults.length}, allFn=${fnResults.every(r => TEST_GRAPH.nodes.find(n => n.id === r.nodeId)?.type === "function")}`,
+    });
+    features.push({ feature: "search-type-filter", status: fnOnlyOk ? "present" : "missing", evidence: `SearchEngine type filtering for 'auth' with types=['function']` });
+
+    // Runtime Test 16: analyzer module - prompt builders and response parsers
+    const rt16 = Date.now();
+    const analyzer = await import(join(ROOT, "src", "analyzer.ts"));
+    const filePrompt = analyzer.buildFileAnalysisPrompt("test.ts", "function hello() {}", "Test project");
+    const projPrompt = analyzer.buildProjectSummaryPrompt(["a.ts", "b.ts"], []);
+    const parsedFile = analyzer.parseFileAnalysisResponse('{"fileSummary":"test","tags":["test"],"complexity":"simple","functionSummaries":{},"classSummaries":{}}');
+    const parsedBad = analyzer.parseFileAnalysisResponse("not json at all");
+    const parsedProj = analyzer.parseProjectSummaryResponse('{"description":"test","frameworks":["bun"],"layers":[]}');
+    const analyzerOk = filePrompt.includes("test.ts") && projPrompt.includes("a.ts")
+      && parsedFile !== null && parsedFile.fileSummary === "test"
+      && parsedBad === null
+      && parsedProj !== null && parsedProj.frameworks.length === 1;
+    results.push({
+      name: "runtime-analyzer-module",
+      category: "runtime",
+      passed: analyzerOk,
+      latencyMs: Date.now() - rt16,
+      failureReason: analyzerOk ? undefined : "Analyzer module functions failed",
+    });
+    features.push({ feature: "llm-file-analyzer", status: analyzerOk ? "present" : "missing", evidence: "buildFileAnalysisPrompt, parseFileAnalysisResponse, buildProjectSummaryPrompt, parseProjectSummaryResponse" });
+
+    // Runtime Test 17: ignore filter module
+    const rt17 = Date.now();
+    const ignoreMod = await import(join(ROOT, "src", "ignore.ts"));
+    const filter = ignoreMod.createIgnoreFilter();
+    const ignored = [
+      filter.isIgnored("node_modules/react/index.js"),
+      filter.isIgnored("dist/bundle.js"),
+      filter.isIgnored("package-lock.json"),
+      filter.isIgnored("src/__pycache__/test.pyc"),
+      filter.isIgnored("coverage/lcov.info"),
+    ];
+    const notIgnored = [
+      filter.isIgnored("src/index.ts"),
+      filter.isIgnored("src/agent.ts"),
+      filter.isIgnored("lib/utils.js"),
+    ];
+    const ignoreOk = ignored.every(Boolean) && notIgnored.every(v => !v);
+    results.push({
+      name: "runtime-ignore-filter",
+      category: "runtime",
+      passed: ignoreOk,
+      latencyMs: Date.now() - rt17,
+      failureReason: ignoreOk ? undefined : `Ignore filter: ignored=${ignored}, notIgnored=${notIgnored}`,
+    });
+    features.push({ feature: "ignore-filter", status: ignoreOk ? "present" : "missing", evidence: "createIgnoreFilter filters node_modules, dist, lock files, coverage" });
+
+    // Runtime Test 18: middleware module
+    const rt18 = Date.now();
+    const mwMod = await import(join(ROOT, "src", "middleware.ts"));
+    const reqCtx = mwMod.requestLogger("GET", "/api/stats", "127.0.0.1");
+    const err401 = mwMod.classifyError(new Error("API key invalid"));
+    const err503 = mwMod.classifyError(new Error("Rate limit exceeded"));
+    const err408 = mwMod.classifyError(new Error("Request timed out"));
+    const err500 = mwMod.classifyError(new Error("Something unexpected"));
+    const mwOk = reqCtx.requestId.startsWith("la-")
+      && err401.status === 401 && err503.status === 503
+      && err408.status === 408 && err500.status === 500;
+    results.push({
+      name: "runtime-middleware",
+      category: "runtime",
+      passed: mwOk,
+      latencyMs: Date.now() - rt18,
+      failureReason: mwOk ? undefined : `Middleware: requestId=${reqCtx.requestId}, 401=${err401.status}, 503=${err503.status}, 408=${err408.status}`,
+    });
+    features.push({ feature: "middleware-layer", status: mwOk ? "present" : "missing", evidence: "requestLogger, classifyError, rateLimiter" });
+
+    // Cleanup temp directory
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  } catch (err) {
+    // If runtime tests fail to import, add a single failure
+    results.push({
+      name: "runtime-import",
+      category: "runtime",
+      passed: false,
+      latencyMs: 0,
+      failureReason: `Runtime tests failed to import: ${(err as Error).message}`,
+    });
+  }
 
   const passedTests = results.filter(r => r.passed).length;
   const failedTests = results.filter(r => !r.passed).length;
@@ -319,7 +650,7 @@ const report = await benchmark();
 if (isJson) {
   console.log(JSON.stringify(report, null, 2));
 } else {
-  console.log(`\n=== learning-anything-server Benchmark ===\n`);
+  console.log(`\n=== learning-anything Benchmark ===\n`);
   console.log(`Tests: ${report.passedTests}/${report.totalTests} passed\n`);
   for (const r of report.results) {
     const icon = r.passed ? "✅" : "❌";

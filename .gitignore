@@ -29,5 +29,8 @@ Thumbs.db
 # Reasonix
 .reasonix/
 
+# Learning-anything knowledge graphs (per-app, generated)
+.learning-anything/
+
 # Logs
 *.log

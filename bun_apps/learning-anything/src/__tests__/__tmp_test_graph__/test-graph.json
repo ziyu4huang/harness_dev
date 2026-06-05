@@ -1,0 +1,258 @@
+{
+  "version": "2.0.0",
+  "kind": "codebase",
+  "project": {
+    "name": "test-project",
+    "languages": [
+      "typescript",
+      "python"
+    ],
+    "frameworks": [
+      "bun",
+      "react"
+    ],
+    "description": "A test project for graph store tests",
+    "analyzedAt": "2025-01-01T00:00:00Z",
+    "gitCommitHash": "abc123"
+  },
+  "nodes": [
+    {
+      "id": "file:src/index.ts",
+      "type": "file",
+      "name": "index.ts",
+      "filePath": "src/index.ts",
+      "summary": "Server entry point",
+      "tags": [
+        "server",
+        "entry"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "fn:src/index.ts:startServer",
+      "type": "function",
+      "name": "startServer",
+      "filePath": "src/index.ts",
+      "summary": "Starts the HTTP server",
+      "tags": [
+        "server"
+      ],
+      "complexity": "simple",
+      "lineRange": [
+        10,
+        30
+      ]
+    },
+    {
+      "id": "file:src/graph.ts",
+      "type": "file",
+      "name": "graph.ts",
+      "filePath": "src/graph.ts",
+      "summary": "Knowledge graph store",
+      "tags": [
+        "graph",
+        "core"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "fn:src/graph.ts:load",
+      "type": "function",
+      "name": "load",
+      "filePath": "src/graph.ts",
+      "summary": "Load graph from disk",
+      "tags": [
+        "io"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "fn:src/graph.ts:search",
+      "type": "function",
+      "name": "search",
+      "filePath": "src/graph.ts",
+      "summary": "Search nodes by query",
+      "tags": [
+        "search",
+        "query"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:src/agent.ts",
+      "type": "file",
+      "name": "agent.ts",
+      "filePath": "src/agent.ts",
+      "summary": "LLM agent module",
+      "tags": [
+        "ai",
+        "agent"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "fn:src/agent.ts:chat",
+      "type": "function",
+      "name": "chat",
+      "filePath": "src/agent.ts",
+      "summary": "Chat completion endpoint",
+      "tags": [
+        "chat",
+        "ai"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:src/config.ts:Config",
+      "type": "class",
+      "name": "Config",
+      "filePath": "src/config.ts",
+      "summary": "Configuration manager",
+      "tags": [
+        "config"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:src/routes.ts",
+      "type": "file",
+      "name": "routes.ts",
+      "filePath": "src/routes.ts",
+      "summary": "API route handlers",
+      "tags": [
+        "api",
+        "routes"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "concept:architecture",
+      "type": "concept",
+      "name": "Architecture",
+      "summary": "Overall system architecture",
+      "tags": [
+        "architecture",
+        "design"
+      ],
+      "complexity": "simple"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:src/index.ts",
+      "target": "fn:src/index.ts:startServer",
+      "type": "contains"
+    },
+    {
+      "source": "file:src/graph.ts",
+      "target": "fn:src/graph.ts:load",
+      "type": "contains"
+    },
+    {
+      "source": "file:src/graph.ts",
+      "target": "fn:src/graph.ts:search",
+      "type": "contains"
+    },
+    {
+      "source": "file:src/agent.ts",
+      "target": "fn:src/agent.ts:chat",
+      "type": "contains"
+    },
+    {
+      "source": "fn:src/index.ts:startServer",
+      "target": "file:src/routes.ts",
+      "type": "imports"
+    },
+    {
+      "source": "fn:src/index.ts:startServer",
+      "target": "file:src/graph.ts",
+      "type": "imports"
+    },
+    {
+      "source": "fn:src/agent.ts:chat",
+      "target": "fn:src/graph.ts:search",
+      "type": "calls"
+    },
+    {
+      "source": "fn:src/agent.ts:chat",
+      "target": "class:src/config.ts:Config",
+      "type": "depends_on"
+    },
+    {
+      "source": "file:src/routes.ts",
+      "target": "fn:src/agent.ts:chat",
+      "type": "imports"
+    },
+    {
+      "source": "file:src/routes.ts",
+      "target": "file:src/graph.ts",
+      "type": "imports"
+    },
+    {
+      "source": "concept:architecture",
+      "target": "file:src/index.ts",
+      "type": "related"
+    },
+    {
+      "source": "fn:src/graph.ts:load",
+      "target": "fn:src/graph.ts:search",
+      "type": "calls"
+    }
+  ],
+  "layers": [
+    {
+      "id": "core",
+      "name": "Core",
+      "description": "Core graph and config modules",
+      "nodeIds": [
+        "file:src/graph.ts",
+        "fn:src/graph.ts:load",
+        "fn:src/graph.ts:search",
+        "class:src/config.ts:Config"
+      ]
+    },
+    {
+      "id": "api",
+      "name": "API",
+      "description": "API and agent layer",
+      "nodeIds": [
+        "file:src/routes.ts",
+        "file:src/agent.ts",
+        "fn:src/agent.ts:chat",
+        "file:src/index.ts",
+        "fn:src/index.ts:startServer"
+      ]
+    }
+  ],
+  "tour": [
+    {
+      "order": 1,
+      "title": "Getting Started",
+      "description": "Start with the entry point",
+      "nodeIds": [
+        "file:src/index.ts",
+        "fn:src/index.ts:startServer"
+      ]
+    },
+    {
+      "order": 2,
+      "title": "Core Graph",
+      "description": "Understand the graph store",
+      "nodeIds": [
+        "file:src/graph.ts",
+        "fn:src/graph.ts:load",
+        "fn:src/graph.ts:search"
+      ],
+      "languageLesson": "Bun.file() is sync and fast"
+    },
+    {
+      "order": 3,
+      "title": "Agent Layer",
+      "description": "Learn the agent module",
+      "nodeIds": [
+        "file:src/agent.ts",
+        "fn:src/agent.ts:chat"
+      ]
+    }
+  ]
+}

@@ -13,8 +13,8 @@ import { join, relative } from "path";
 
 const ROOT = import.meta.dir.replace(/[/\\]scripts$/, "");
 const DIST = join(ROOT, "..", "..", "dist");
-const BUNDLE = join(DIST, "learning-anything-server.js");
-const BUNDLE_MAP = join(DIST, "learning-anything-server.js.map");
+const BUNDLE = join(DIST, "learning-anything.js");
+const BUNDLE_MAP = join(DIST, "learning-anything.js.map");
 const isJson = process.argv.includes("--json");
 
 interface Gate {
@@ -54,7 +54,7 @@ async function check(): Promise<QualityReport> {
     gate: "bundle-exists",
     passed: bundleExists,
     severity: "critical",
-    message: bundleExists ? "Bundle file exists" : "Bundle file missing at dist/learning-anything-server.js",
+    message: bundleExists ? "Bundle file exists" : "Bundle file missing at dist/learning-anything.js",
   });
   if (!bundleExists) score -= 30;
 
@@ -180,6 +180,48 @@ async function check(): Promise<QualityReport> {
   });
   if (!endpointCountPass) score -= 5;
 
+  // Gate 10: Undeclared dependencies check
+  // Scan source files for bare import specifiers not in package.json
+  // Note: srcDir is already declared above (line 86)
+  const declaredDeps = new Set(Object.keys(pkg.dependencies ?? {}));
+  const BARE_IMPORT_RE = /(?:import\s+.*?from\s+['"]|require\s*\(\s*['"])(@?[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*(?:\/[a-zA-Z0-9_-]+)*)/g;
+  const foundImports = new Set<string>();
+
+  if (existsSync(srcDir)) {
+    const builtins = new Set(["fs", "path", "http", "https", "url", "stream", "crypto", "os", "util", "events", "buffer", "child_process", "net", "tls", "zlib", "assert", "process", "bun"]);
+    const allSrcFiles = readdirSync(srcDir, { recursive: true })
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts"))
+      .map((f) => join(srcDir, f));
+
+    for (const file of allSrcFiles) {
+      const content = readFileSync(file, "utf-8");
+      let match: RegExpExecArray | null;
+      while ((match = BARE_IMPORT_RE.exec(content)) !== null) {
+        const specifier = match[1];
+        if (!specifier.startsWith("@") && !specifier.includes("/")) {
+          if (builtins.has(specifier)) continue;
+        }
+        const pkgName = specifier.startsWith("@")
+          ? specifier.split("/").slice(0, 2).join("/")
+          : specifier;
+        foundImports.add(pkgName);
+      }
+    }
+  }
+
+  const undeclaredDeps = [...foundImports].filter(dep => !declaredDeps.has(dep));
+  const undeclaredPass = undeclaredDeps.length === 0;
+  gates.push({
+    gate: "undeclared-deps",
+    passed: undeclaredPass,
+    severity: "warning",
+    message: undeclaredPass
+      ? "All imports are declared in package.json"
+      : `Undeclared dependencies: ${undeclaredDeps.join(", ")}`,
+    detail: undeclaredDeps.join(", "),
+  });
+  if (!undeclaredPass) score -= 10;
+
   const overallPassed = score >= 60 && !gates.some(g => g.severity === "critical" && !g.passed);
 
   return {
@@ -195,7 +237,7 @@ const report = await check();
 if (isJson) {
   console.log(JSON.stringify(report, null, 2));
 } else {
-  console.log(`\n=== learning-anything-server Quality Check ===\n`);
+  console.log(`\n=== learning-anything Quality Check ===\n`);
   console.log(`Overall: ${report.overallPassed ? "PASS ✅" : "FAIL ❌"} (${report.score}/100)`);
   console.log(`Bundle:  ${report.bundleSizeKB} KB\n`);
   for (const g of report.gates) {

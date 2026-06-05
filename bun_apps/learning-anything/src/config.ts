@@ -69,6 +69,9 @@ export function getEnv() {
     host: process.env.UA_HOST ?? "127.0.0.1",
     graphPath: process.env.UA_GRAPH_PATH ?? "",
     dashboardUrl: process.env.UA_DASHBOARD_URL ?? "http://127.0.0.1:5174",
+    logLevel: process.env.UA_LOG_LEVEL ?? "info",
+    rateLimitMax: parseInt(process.env.UA_RATE_LIMIT_MAX ?? "100", 10),
+    rateLimitWindowMs: parseInt(process.env.UA_RATE_LIMIT_WINDOW_MS ?? "60000", 10),
   };
 }
 
@@ -99,4 +102,8 @@ export const SYSTEM_PROMPTS = {
   diffAnalyst: `You are a change impact analyst. Given a diff analysis showing changed components, affected downstream components, and impacted layers, assess the risk and provide actionable recommendations. Focus on: which changes need careful review, what tests to run, and which areas might have hidden side effects.`,
 
   onboardingGuide: `You are a technical onboarding assistant. You help new team members understand a codebase by providing structured onboarding guides. Given a knowledge graph with architecture layers, key concepts, and guided tours, create clear, progressive documentation that builds understanding from high-level architecture to specific implementation details.`,
+
+  fileAnalyst: `You are a code analysis expert. Given a source file's content and project context, analyze it to produce a structured summary including: overall file purpose, relevant tags, complexity assessment, function/class summaries, and language-specific notes. Be precise and concise.`,
+
+  projectSummarizer: `You are a project architecture analyst. Given a list of project files and sample source code, produce a comprehensive project summary including: project description, detected frameworks and libraries, and logical architectural layers with their file patterns. Think holistically about the project structure.`,
 } as const;

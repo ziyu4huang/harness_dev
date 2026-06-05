@@ -7,6 +7,8 @@
 
 import { readFileSync, existsSync } from "fs";
 import { resolve, join } from "path";
+import { validateGraph, type GraphIssue } from "./validate.js";
+import { SearchEngine, type SearchOptions } from "./search.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -72,10 +74,14 @@ export class GraphStore {
   private edgesByTarget: Map<string, GraphEdge[]> = new Map();
   private filePath: string;
   private loadedAt = 0;
+  private searchEngine: SearchEngine | null = null;
 
   constructor(graphPath: string) {
     this.filePath = graphPath;
   }
+
+  /** Validation issues from the last load */
+  validationIssues: GraphIssue[] = [];
 
   /** Load (or reload) the graph from disk */
   load(): void {
@@ -84,8 +90,26 @@ export class GraphStore {
     }
 
     const raw = readFileSync(this.filePath, "utf-8");
-    const parsed = JSON.parse(raw) as KnowledgeGraph;
-    this.graph = parsed;
+    const parsed = JSON.parse(raw);
+    const validation = validateGraph(parsed);
+
+    if (!validation.success) {
+      throw new Error(`Graph validation failed: ${validation.fatal ?? "unknown error"}`);
+    }
+
+    // Log any auto-corrected or dropped issues
+    if (validation.issues.length > 0) {
+      this.validationIssues = validation.issues;
+      for (const issue of validation.issues) {
+        const prefix = issue.level === "auto-corrected" ? "WARN" : "DROP";
+        console.warn(`[validate] ${prefix}: ${issue.message}`);
+      }
+    } else {
+      this.validationIssues = [];
+    }
+
+    const validated = validation.data!;
+    this.graph = validated;
     this.loadedAt = Date.now();
 
     // Build indexes
@@ -93,11 +117,11 @@ export class GraphStore {
     this.edgesBySource.clear();
     this.edgesByTarget.clear();
 
-    for (const node of parsed.nodes) {
+    for (const node of validated.nodes) {
       this.nodeIndex.set(node.id, node);
     }
 
-    for (const edge of parsed.edges) {
+    for (const edge of validated.edges) {
       const src = this.edgesBySource.get(edge.source) ?? [];
       src.push(edge);
       this.edgesBySource.set(edge.source, src);
@@ -106,6 +130,9 @@ export class GraphStore {
       tgt.push(edge);
       this.edgesByTarget.set(edge.target, tgt);
     }
+
+    // Rebuild search engine index
+    this.searchEngine = new SearchEngine(validated.nodes);
   }
 
   /** Reload if stale (older than cacheTtlMs) */
@@ -168,21 +195,18 @@ export class GraphStore {
     return { nodes: [center, ...neighbors], edges };
   }
 
-  /** Text search across node names, summaries, and tags */
-  search(query: string, limit = 50): GraphNode[] {
+  /** Fuzzy search across node names, summaries, tags, and language notes using Fuse.js */
+  search(query: string, limit = 50, options?: Omit<SearchOptions, "limit">): GraphNode[] {
     this.ensureLoaded();
-    const q = query.toLowerCase();
-    const scored = this.graph!.nodes.map(node => {
-      let score = 0;
-      if (node.name.toLowerCase().includes(q)) score += 10;
-      if (node.summary.toLowerCase().includes(q)) score += 5;
-      if (node.tags.some(t => t.toLowerCase().includes(q))) score += 3;
-      if (node.filePath?.toLowerCase().includes(q)) score += 2;
-      return { node, score };
-    }).filter(s => s.score > 0);
+    if (!this.searchEngine) return [];
 
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, limit).map(s => s.node);
+    const results = this.searchEngine.search(query, { ...options, limit });
+    const nodes: GraphNode[] = [];
+    for (const r of results) {
+      const node = this.nodeIndex.get(r.nodeId);
+      if (node) nodes.push(node);
+    }
+    return nodes;
   }
 
   /** Get nodes by layer */

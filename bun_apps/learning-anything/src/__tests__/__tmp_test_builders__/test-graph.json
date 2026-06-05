@@ -1,0 +1,171 @@
+{
+  "version": "2.0.0",
+  "kind": "codebase",
+  "project": {
+    "name": "test-project",
+    "languages": [
+      "typescript"
+    ],
+    "frameworks": [
+      "bun"
+    ],
+    "description": "A test project for builder tests",
+    "analyzedAt": "2025-01-01T00:00:00Z",
+    "gitCommitHash": "abc123"
+  },
+  "nodes": [
+    {
+      "id": "file:src/index.ts",
+      "type": "file",
+      "name": "index.ts",
+      "filePath": "src/index.ts",
+      "summary": "Server entry point",
+      "tags": [
+        "server",
+        "entry"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "fn:src/index.ts:startServer",
+      "type": "function",
+      "name": "startServer",
+      "filePath": "src/index.ts",
+      "summary": "Starts the HTTP server",
+      "tags": [
+        "server"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:src/graph.ts",
+      "type": "file",
+      "name": "graph.ts",
+      "filePath": "src/graph.ts",
+      "summary": "Knowledge graph store",
+      "tags": [
+        "graph",
+        "core"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "fn:src/graph.ts:load",
+      "type": "function",
+      "name": "load",
+      "filePath": "src/graph.ts",
+      "summary": "Load graph from disk",
+      "tags": [
+        "io",
+        "load"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:src/agent.ts",
+      "type": "file",
+      "name": "agent.ts",
+      "filePath": "src/agent.ts",
+      "summary": "LLM agent module",
+      "tags": [
+        "ai",
+        "agent"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "fn:src/agent.ts:chat",
+      "type": "function",
+      "name": "chat",
+      "filePath": "src/agent.ts",
+      "summary": "Chat completion endpoint",
+      "tags": [
+        "chat",
+        "ai"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "concept:architecture",
+      "type": "concept",
+      "name": "Architecture",
+      "summary": "Overall system architecture",
+      "tags": [
+        "architecture",
+        "design"
+      ],
+      "complexity": "simple"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:src/index.ts",
+      "target": "fn:src/index.ts:startServer",
+      "type": "contains"
+    },
+    {
+      "source": "file:src/graph.ts",
+      "target": "fn:src/graph.ts:load",
+      "type": "contains"
+    },
+    {
+      "source": "fn:src/index.ts:startServer",
+      "target": "file:src/graph.ts",
+      "type": "imports"
+    },
+    {
+      "source": "fn:src/agent.ts:chat",
+      "target": "fn:src/graph.ts:load",
+      "type": "calls"
+    },
+    {
+      "source": "file:src/agent.ts",
+      "target": "fn:src/agent.ts:chat",
+      "type": "contains"
+    },
+    {
+      "source": "concept:architecture",
+      "target": "file:src/index.ts",
+      "type": "related"
+    }
+  ],
+  "layers": [
+    {
+      "id": "core",
+      "name": "Core",
+      "description": "Core modules",
+      "nodeIds": [
+        "file:src/graph.ts",
+        "fn:src/graph.ts:load"
+      ]
+    },
+    {
+      "id": "api",
+      "name": "API",
+      "description": "API layer",
+      "nodeIds": [
+        "file:src/agent.ts",
+        "fn:src/agent.ts:chat"
+      ]
+    }
+  ],
+  "tour": [
+    {
+      "order": 1,
+      "title": "Start Here",
+      "description": "Begin with the entry point",
+      "nodeIds": [
+        "file:src/index.ts"
+      ]
+    },
+    {
+      "order": 2,
+      "title": "Core Graph",
+      "description": "Understand the graph store",
+      "nodeIds": [
+        "file:src/graph.ts"
+      ],
+      "languageLesson": "Graphs are loaded synchronously"
+    }
+  ]
+}

@@ -4,6 +4,7 @@ export const meta = {
   whenToUse: 'Run to develop and iteratively improve the learning-anything bun web server. Each iteration: learn → audit → build → benchmark → reflect → improve → regression → report. Self-reflects to improve the workflow .js itself.',
   phases: [
     { title: 'Resolve', detail: 'Detect absolute project root path via git rev-parse' },
+    { title: 'Preflight', detail: 'Check if UA dashboard is reachable before Learn phase' },
     { title: 'Learn', detail: 'Query UA dashboard API + read UA plugin source files to catalog features' },
     { title: 'Gap Analysis', detail: 'Compare UA features vs bun-app features, identify missing capabilities with priorities' },
     { title: 'History', detail: 'Load metrics history from previous runs, display trend summary' },
@@ -40,8 +41,8 @@ export const meta = {
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
-const BUNDLE_NAME = 'learning-anything-server.js'
-const BUNDLE_MAP_NAME = 'learning-anything-server.js.map'
+const BUNDLE_NAME = 'learning-anything.js'
+const BUNDLE_MAP_NAME = 'learning-anything.js.map'
 const WORKFLOW_REL = '.claude/workflows/learning-anything-develop-flow.js'
 
 const DEFAULTS = {
@@ -97,6 +98,37 @@ log(`  PROJECT_ROOT: ${PROJECT_ROOT || '(fallback)'}`)
 log(`  APP_DIR:      ${APP_DIR}`)
 log(`  DIST_DIR:     ${DIST_DIR}`)
 log(`  BUNDLE_PATH:  ${BUNDLE_PATH}`)
+
+// ─── Phase -0.5: Preflight health gate ────────────────────────────────────────
+
+phase('Preflight')
+
+const dashboardUrl = config.dashboardUrl.replace(/\/$/, '')
+const tokenQuery = config.dashboardToken ? `?token=${config.dashboardToken}` : ''
+
+const PREFLIGHT_SCHEMA = {
+  type: 'object',
+  properties: {
+    dashboardAvailable: { type: 'boolean' },
+    httpStatus: { type: 'number' },
+    responseTimeMs: { type: 'number' },
+  },
+  required: ['dashboardAvailable'],
+}
+
+const preflight = await agent(
+  `Check if the UA dashboard at ${dashboardUrl} is reachable.
+  Run: Bash("curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 ${dashboardUrl}/health 2>&1 || echo 'unreachable'")
+  Return { dashboardAvailable: true/false, httpStatus: <status code or 0>, responseTimeMs: <approximate> }.
+  If connection is refused or times out, set dashboardAvailable to false.`,
+  { label: 'preflight-check', phase: 'Preflight', model: 'haiku', schema: PREFLIGHT_SCHEMA },
+)
+
+const dashboardAvailable = preflight?.dashboardAvailable ?? false
+log(`Preflight: Dashboard at ${dashboardUrl} is ${dashboardAvailable ? 'REACHABLE' : 'UNREACHABLE'}`)
+if (!dashboardAvailable) {
+  log(`  WARNING: Dashboard not available. Learn phase will use file-based fallback only.`)
+}
 
 // ─── Phase 0: Learn from Understand-Anything dashboard ───────────────────────
 
@@ -156,18 +188,17 @@ const LEARN_SCHEMA = {
   required: ['projectInfo', 'architecture'],
 }
 
-const dashboardUrl = config.dashboardUrl.replace(/\/$/, '')
-const tokenQuery = config.dashboardToken ? `?token=${config.dashboardToken}` : ''
-
 // UA plugin source paths (for reading reference implementations)
 const UA_PLUGIN_SRC = 'C:/Users/ziyu4/.claude-glm/plugins/cache/understand-anything/understand-anything/2.7.6/src'
 const UA_PLUGIN_CORE = 'C:/Users/ziyu4/.claude-glm/plugins/cache/understand-anything/understand-anything/2.7.6/packages/core/src'
 
 const learned = await agent(
   `Learn the Understand-Anything project by querying its knowledge graph dashboard API AND reading its source files.
-  The dashboard is running at ${dashboardUrl}.
+  ${dashboardAvailable
+    ? `The dashboard is running at ${dashboardUrl}. You can query it.`
+    : `IMPORTANT: The dashboard at ${dashboardUrl} is NOT reachable. SKIP ALL curl commands to the dashboard. Go directly to reading source files and the knowledge-graph.json file.`}
 
-  Step 1: Get project stats:
+  ${dashboardAvailable ? `Step 1: Get project stats:
   Bash("curl -s '${dashboardUrl}/api/stats${tokenQuery}' 2>&1 || echo '{}'" )
 
   Step 2: Get layers:
@@ -182,7 +213,8 @@ const learned = await agent(
   Bash("curl -s '${dashboardUrl}/api/search?q=agent+skill&type=file${tokenQuery}' 2>&1 || echo '[]'")
 
   Step 5: Get the knowledge graph directly:
-  Bash("curl -s 'http://127.0.0.1:5174/knowledge-graph.json' 2>&1 | head -c 5000 || echo '{}'")
+  Bash("curl -s 'http://127.0.0.1:5174/knowledge-graph.json' 2>&1 | head -c 5000 || echo '{}'")` : `Step 1: Read the knowledge graph file directly:
+  Bash("cat 'C:/Users/ziyu4/proj/Understand-Anything/.understand-anything/knowledge-graph.json' | head -c 10000")`}
 
   Step 6 (IMPORTANT): Read UA plugin source files to catalog ALL features that can be ported:
   Bash("cat '${UA_PLUGIN_SRC}/context-builder.ts' 2>/dev/null | head -c 3000 || echo 'not found'")
@@ -198,9 +230,6 @@ const learned = await agent(
 
   Parse all responses and synthesize into a structured summary.
   Include a "uaFeatures" array listing each UA feature that can be ported.
-
-  If the dashboard API is not available (connection refused), fall back to reading the knowledge graph file:
-  Bash("cat 'C:/Users/ziyu4/proj/Understand-Anything/.understand-anything/knowledge-graph.json' | head -c 10000")
 
   Return the structured summary.`,
   { label: 'learn-dashboard', phase: 'Learn', model: 'sonnet', schema: LEARN_SCHEMA },
@@ -777,12 +806,44 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     - src/explain.ts: Node explanation builder (port of UA explain-builder.ts)
     - src/diff.ts: Change impact analysis (port of UA diff-analyzer.ts)
     - src/onboard.ts: Onboarding guide builder (port of UA onboard-builder.ts)
+    - src/validate.ts: Graph validation layer with Zod schema and 4-tier pipeline
+    - src/search.ts: Fuse.js fuzzy search engine (replaces naive text search)
+    - src/__tests__/: Unit tests for graph store, builders, and validation
 
     The server uses:
     - Vercel AI SDK (ai, @ai-sdk/openai) for LLM calls
     - DeepSeek models (pro, flash) via OpenAI-compatible API
     - Bun native HTTP server (Bun.serve)
     - zod for structured output validation
+    - fuse.js for fuzzy search
+
+    ## CRITICAL: Read Actual Source Code
+
+    BEFORE planning improvements, you MUST read the actual source files of the modules targeted for improvement.
+    This allows you to identify specific code smells, missing error handling, and exact locations.
+
+    Read ALL bun-app source files (no truncation — full files):
+    Bash("cat ${APP_DIR}/src/graph.ts")
+    Bash("cat ${APP_DIR}/src/routes.ts")
+    Bash("cat ${APP_DIR}/src/agent.ts")
+    Bash("cat ${APP_DIR}/src/config.ts")
+    Bash("cat ${APP_DIR}/src/validate.ts")
+    Bash("cat ${APP_DIR}/src/search.ts")
+    Bash("cat ${APP_DIR}/src/context.ts")
+    Bash("cat ${APP_DIR}/src/explain.ts")
+    Bash("cat ${APP_DIR}/src/diff.ts")
+    Bash("cat ${APP_DIR}/src/onboard.ts")
+    Bash("cat ${APP_DIR}/src/analyzer.ts")
+    Bash("cat ${APP_DIR}/src/ignore.ts")
+    Bash("cat ${APP_DIR}/src/middleware.ts")
+
+    If the gap analysis identifies UA features to port, also read the corresponding UA source files:
+    Bash("cat ${UA_PLUGIN_SRC}/context-builder.ts 2>/dev/null || echo 'not found'")
+    Bash("cat ${UA_PLUGIN_CORE}/schema.ts 2>/dev/null || echo 'not found'")
+    Bash("cat ${UA_PLUGIN_CORE}/search.ts 2>/dev/null || echo 'not found'")
+
+    Your improvement plans should reference SPECIFIC lines, functions, and patterns you observed in the source code,
+    not just abstract descriptions. This makes the Reflect -> Improve handoff more effective.
 
     ## Your Task
 
@@ -792,6 +853,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
        - PRIORITY: If there are gaps from the gap analysis (${gaps.length} found), focus on porting those first
        - Each must reference the UA source file to read: ${UA_PLUGIN_SRC}/*
        - Each must have concrete approach, filesToModify, effort/impact rating
+       - Reference SPECIFIC code you read (function names, line patterns, exact issues)
        - Consider: better error handling, more endpoints, caching, middleware, logging
        - Consider adding real tests (test file currently may not exist)
        - Must not break existing functionality
@@ -871,6 +933,19 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
   const improvements = await agent(
     `Implement improvements to BOTH the learning-anything-server bun-app AND the development workflow.
+
+    ## STEP 0: READ CURRENT SOURCE FILES (MANDATORY)
+    Before writing ANY code, you MUST read each file you plan to modify. This prevents conflicts with existing implementations.
+    Bash("cat ${APP_DIR}/src/graph.ts")
+    Bash("cat ${APP_DIR}/src/agent.ts")
+    Bash("cat ${APP_DIR}/src/routes.ts")
+    Bash("cat ${APP_DIR}/src/config.ts")
+    Bash("cat ${APP_DIR}/src/index.ts")
+    Bash("cat ${APP_DIR}/src/analyzer.ts")
+    Bash("cat ${APP_DIR}/src/ignore.ts")
+    Bash("cat ${APP_DIR}/src/middleware.ts")
+
+    After ALL changes, verify TypeScript parses: Bash("cd ${APP_DIR} && bun build --no-bundle src/index.ts 2>&1")
 
     ## Bun-App Improvement Plan
     ${JSON.stringify(reflection?.bunAppImprovements || [], null, 2)}
@@ -1032,6 +1107,8 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     verdict: report?.overallVerdict || 'unknown',
     changesSummary: improvements?.summary || '',
     workflowImprovements: workflowChanges,
+    remainingGaps: gaps.length,
+    highPriorityGaps: remainingHighGaps,
   }
   previousMetrics = iterationRecord
   runIterations.push(iterationRecord)
@@ -1044,22 +1121,30 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   log(`  Verdict: ${report?.overallVerdict || 'unknown'}`)
   log(`${'─'.repeat(60)}\n`)
 
-  // ─── Convergence gate ──────────────────────────────────────────────────
+  // ─── Convergence gate (with high-priority gap awareness) ───────────────
   const totalChanges = bunAppChanges + workflowChanges + scriptChanges
   const qualityDelta = Math.abs(report?.qualityScore?.delta || 0)
 
-  if (totalChanges === 0) {
+  // Count remaining high-priority gaps that haven't been addressed
+  const remainingHighGaps = gaps.filter(g => g.priority === 'high').length
+
+  if (totalChanges === 0 && remainingHighGaps === 0) {
     consecutiveLowDelta++
     if (consecutiveLowDelta >= CONVERGENCE_MAX_LOW_DELTAS) {
       converged = true
-      convergenceReason = `No changes for ${consecutiveLowDelta} consecutive iterations`
+      convergenceReason = `No changes and no high-priority gaps for ${consecutiveLowDelta} consecutive iterations`
     }
-  } else if (qualityDelta < CONVERGENCE_DELTA_THRESHOLD) {
+  } else if (qualityDelta < CONVERGENCE_DELTA_THRESHOLD && remainingHighGaps === 0) {
     consecutiveLowDelta++
     if (consecutiveLowDelta >= CONVERGENCE_MAX_LOW_DELTAS) {
       converged = true
-      convergenceReason = `Quality delta < ${CONVERGENCE_DELTA_THRESHOLD} for ${consecutiveLowDelta} iterations`
+      convergenceReason = `Quality delta < ${CONVERGENCE_DELTA_THRESHOLD} and no high-priority gaps for ${consecutiveLowDelta} iterations`
     }
+  } else if (totalChanges === 0 && remainingHighGaps > 0) {
+    // Still have high-priority gaps but no changes applied — count as low delta
+    // but don't converge, just log warning
+    log(`[${iteration}] WARNING: ${remainingHighGaps} high-priority gaps remain but no changes were applied`)
+    consecutiveLowDelta = 0
   } else {
     consecutiveLowDelta = 0
   }

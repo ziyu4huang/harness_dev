@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * learning-anything-server
+ * learning-anything
  *
  * Bun web server that serves as a Claude Code dynamic workflow backend.
  * Uses Vercel AI SDK + DeepSeek models for LLM/agent capabilities.
@@ -72,7 +72,7 @@ const server = Bun.serve({
 });
 
 console.log(`\n  ╔══════════════════════════════════════════════════════╗`);
-console.log(`  ║  learning-anything-server                           ║`);
+console.log(`  ║  learning-anything                           ║`);
 console.log(`  ║  http://${env.host}:${env.port}                        ║`);
 console.log(`  ║  Graph: ${String(graphStore.loaded ? "loaded" : "not loaded").padEnd(43)}║`);
 console.log(`  ║  Dashboard: ${env.dashboardUrl.padEnd(38)}║`);
@@ -86,11 +86,13 @@ console.log(`  GET  /api/nodes/:id          Get node + edges`);
 console.log(`  GET  /api/nodes/:id/neighbors 1-hop neighborhood`);
 console.log(`  GET  /api/nodes/:id/deps     Dependency tree`);
 console.log(`  GET  /api/layers             List layers`);
-console.log(`  GET  /api/search?q=          Text search`);
+console.log(`  GET  /api/search?q=&ignored= Text search (ignore filter)`);
 console.log(`  POST /api/chat               LLM chat (body: {messages, model})`);
 console.log(`  POST /api/chat/stream        Streaming LLM chat`);
 console.log(`  POST /api/analyze/root-cause Root cause analysis`);
 console.log(`  POST /api/analyze/architecture Architecture analysis`);
+console.log(`  POST /api/analyze/file       LLM file analysis (body: {filePath, content})`);
+console.log(`  POST /api/analyze/project-summary Project summary`);
 console.log(`  POST /api/workflow/design    Workflow design`);
 console.log(`  GET  /api/explain?path=      Explain node (UA port)`);
 console.log(`  POST /api/explain            Explain node (body: {path})`);

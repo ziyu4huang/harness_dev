@@ -126,7 +126,7 @@ function audit(): AuditReport {
   }
 
   // Bundle size
-  const bundlePath = join(ROOT, "..", "..", "dist", "learning-anything-server.js");
+  const bundlePath = join(ROOT, "..", "..", "dist", "learning-anything.js");
   const bundleSizeKB = existsSync(bundlePath)
     ? Math.round(statSync(bundlePath).size / 1024 * 10) / 10
     : 0;
@@ -160,6 +160,15 @@ function audit(): AuditReport {
     "hotspot-detection",           // getHotspots in graph.ts
     "node-by-path",                // getNodeByPath in graph.ts
     "child-nodes",                 // getChildNodes in graph.ts
+    // Phase 2 features (gap analysis)
+    "llm-file-analyzer",           // analyzer.ts + agent.ts analyzeFile
+    "project-summarizer",          // agent.ts summarizeProject
+    "ignore-filter",               // ignore.ts
+    "middleware-layer",            // middleware.ts (request logging, rate limiting, error boundary)
+    "rate-limiting",               // middleware.ts rateLimiter
+    "search-ignore-filtering",     // routes.ts search with ignored parameter
+    "request-logging",             // middleware.ts requestLogger
+    "error-classification",        // middleware.ts classifyError
   ];
 
   const portedFeatures: string[] = [];
@@ -176,6 +185,14 @@ function audit(): AuditReport {
       "llm-agent": "agent",
       "api-routes": "routes",
       "deepseek-models": "config",
+      "llm-file-analyzer": "analyzer",
+      "ignore-filter": "ignore",
+      "middleware-layer": "middleware",
+      "project-summarizer": "agent",
+      "rate-limiting": "middleware",
+      "search-ignore-filtering": "routes",
+      "request-logging": "middleware",
+      "error-classification": "middleware",
     };
     const requiredModule = moduleMap[feat];
     if (requiredModule) {
@@ -194,6 +211,12 @@ function audit(): AuditReport {
         "hotspot-detection": "getHotspots",
         "node-by-path": "getNodeByPath",
         "child-nodes": "getChildNodes",
+        "llm-file-analyzer": "analyzeFile",
+        "project-summarizer": "summarizeProject",
+        "rate-limiting": "rateLimiter",
+        "request-logging": "requestLogger",
+        "error-classification": "classifyError",
+        "search-ignore-filtering": "createIgnoreFilter",
       };
       const pattern = fnPatterns[feat];
       if (pattern) {
@@ -214,13 +237,107 @@ function audit(): AuditReport {
     ? Math.round((portedFeatures.length / UA_FEATURES.length) * 100)
     : 0;
 
+  // ─── Dependency Health Checks ─────────────────────────────────────────────
+
+  const declaredDeps = new Set(Object.keys(pkg.dependencies ?? {}));
+
+  // Scan for bare import specifiers (not starting with . or /)
+  const BARE_IMPORT_RE = /(?:import\s+.*?from\s+['"]|require\s*\(\s*['"])(@?[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*(?:\/[a-zA-Z0-9_-]+)*)/g;
+  const foundImports = new Set<string>();
+  for (const file of [...srcFiles, ...scriptFiles]) {
+    const content = readFileSync(file, "utf-8");
+    let match: RegExpExecArray | null;
+    while ((match = BARE_IMPORT_RE.exec(content)) !== null) {
+      const specifier = match[1];
+      // Skip Bun/Node built-ins
+      if (!specifier.startsWith("@") && !specifier.includes("/")) {
+        const builtins = new Set(["fs", "path", "http", "https", "url", "stream", "crypto", "os", "util", "events", "buffer", "child_process", "net", "tls", "zlib", "assert", "process", "bun"]);
+        if (builtins.has(specifier)) continue;
+      }
+      // Normalize scoped package: @scope/pkg -> @scope/pkg
+      // For non-scoped: take first segment (e.g. fuse.js -> fuse.js)
+      const pkgName = specifier.startsWith("@")
+        ? specifier.split("/").slice(0, 2).join("/")
+        : specifier;
+      foundImports.add(pkgName);
+    }
+  }
+
+  // Undeclared: imported but not in package.json dependencies
+  const undeclaredDeps = [...foundImports].filter(dep => !declaredDeps.has(dep));
+
+  // Unused: declared but never imported
+  const unusedDeps = [...declaredDeps].filter(dep => !foundImports.has(dep));
+
+  // ─── Dead Export Detection ────────────────────────────────────────────────
+
+  // Collect all exported names
+  const exportedNames = new Map<string, string[]>(); // name -> [files that export it]
+  for (const file of srcFiles) {
+    const content = readFileSync(file, "utf-8");
+    const lines = content.split("\n");
+    for (const line of lines) {
+      const fnMatch = line.match(/^export\s+(?:async\s+)?function\s+(\w+)/);
+      if (fnMatch) {
+        const name = fnMatch[1];
+        const arr = exportedNames.get(name) ?? [];
+        arr.push(relative(ROOT, file).replace(/\\/g, "/"));
+        exportedNames.set(name, arr);
+      }
+      const classMatch = line.match(/^export\s+(?:class|interface|type)\s+(\w+)/);
+      if (classMatch) {
+        const name = classMatch[1];
+        const arr = exportedNames.get(name) ?? [];
+        arr.push(relative(ROOT, file).replace(/\\/g, "/"));
+        exportedNames.set(name, arr);
+      }
+      const constMatch = line.match(/^export\s+const\s+(\w+)/);
+      if (constMatch) {
+        const name = constMatch[1];
+        const arr = exportedNames.get(name) ?? [];
+        arr.push(relative(ROOT, file).replace(/\\/g, "/"));
+        exportedNames.set(name, arr);
+      }
+    }
+  }
+
+  // Check which exports are never imported elsewhere
+  const deadExports: string[] = [];
+  for (const [name] of exportedNames) {
+    let used = false;
+    for (const file of [...srcFiles, ...scriptFiles]) {
+      const content = readFileSync(file, "utf-8");
+      // Check if the name appears in an import statement
+      if (content.match(new RegExp(`import.*\\b${name}\\b.*from`, "m")) || content.match(new RegExp(`\\{[^}]*\\b${name}\\b[^}]*\\}`, "m"))) {
+        used = true;
+        break;
+      }
+      // Also check if used as a type annotation or in code within the same file
+      const exportingFiles = exportedNames.get(name) ?? [];
+      for (const ef of exportingFiles) {
+        if (!relative(ROOT, file).replace(/\\/g, "/").includes(ef.replace(/\/[^/]+$/, ""))) {
+          // Different directory -- check for any reference
+          if (content.includes(name)) {
+            used = true;
+            break;
+          }
+        }
+      }
+      if (used) break;
+    }
+    if (!used) {
+      const files = exportedNames.get(name)?.join(", ") ?? "unknown";
+      deadExports.push(`${name} (in ${files})`);
+    }
+  }
+
   return {
     features,
     issues,
     health: {
-      undeclaredDeps: [],
-      unusedDeps: [],
-      deadExports: [],
+      undeclaredDeps,
+      unusedDeps,
+      deadExports,
     },
     stats: {
       codeLines,
@@ -243,7 +360,7 @@ const report = audit();
 if (isJson) {
   console.log(JSON.stringify(report, null, 2));
 } else {
-  console.log(`\n=== learning-anything-server Audit ===\n`);
+  console.log(`\n=== learning-anything Audit ===\n`);
   console.log(`Features:       ${report.features.length}`);
   console.log(`Source files:   ${report.stats.sourceFiles}`);
   console.log(`Script files:   ${report.stats.scriptFiles}`);
@@ -263,6 +380,24 @@ if (isJson) {
     console.log(`\nMissing UA features:`);
     for (const f of report.uaFeatureCoverage.missingFeatures) {
       console.log(`  - ${f}`);
+    }
+  }
+  if (report.health.undeclaredDeps.length > 0) {
+    console.log(`\nUndeclared dependencies (imported but not in package.json):`);
+    for (const d of report.health.undeclaredDeps) {
+      console.log(`  - ${d}`);
+    }
+  }
+  if (report.health.unusedDeps.length > 0) {
+    console.log(`\nUnused dependencies (declared but never imported):`);
+    for (const d of report.health.unusedDeps) {
+      console.log(`  - ${d}`);
+    }
+  }
+  if (report.health.deadExports.length > 0) {
+    console.log(`\nDead exports (never referenced outside their file):`);
+    for (const e of report.health.deadExports) {
+      console.log(`  - ${e}`);
     }
   }
   console.log();
