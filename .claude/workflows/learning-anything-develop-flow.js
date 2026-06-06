@@ -924,6 +924,7 @@ let previousModifiedFiles = [] // tracks files modified in previous iteration fo
 let convergenceReason = ''
 let gapsClosedThisIteration = 0
 let gapsRemainingAtStart = gaps.length // snapshot before any iteration
+let currentRemainingGaps = gaps.length // running counter, decremented per verified gap closure
 
 for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
@@ -1164,6 +1165,8 @@ This data was verified by git diff comparison — trust these as confirmed chang
 
     ## CRITICAL: Read Actual Source Code
 
+    MANDATORY: Read AT MOST 3 source files total. Reading more wastes context and degrades analysis quality.
+
     BEFORE planning improvements, you MUST read the actual source files of the modules targeted for improvement.
     This allows you to identify specific code smells, missing error handling, and exact locations.
 
@@ -1182,7 +1185,8 @@ This data was verified by git diff comparison — trust these as confirmed chang
     ${previousModifiedFiles.length > 0 ? `## FILES CHANGED IN PREVIOUS ITERATION
     The following files were modified in the previous iteration: ${previousModifiedFiles.join(', ')}.
     Read ONLY these files plus any files directly relevant to identified gaps.
-    For unchanged files, trust the previous iteration's analysis — do NOT re-read them.` : `Always read the core modules that are likely targets for improvement:
+    DO NOT re-read any file listed in previous iteration analysis UNLESS it appears in the gap targets or previousModifiedFiles list.
+    If a file was analyzed in a previous iteration AND was not modified since, reference the previous analysis from the Previous Metrics section instead of re-reading it.` : `Always read the core modules that are likely targets for improvement:
     Bash("cat ${APP_DIR}/src/graph.ts")
     Bash("cat ${APP_DIR}/src/routes.ts")
     Bash("cat ${APP_DIR}/src/agent.ts")
@@ -1191,6 +1195,7 @@ This data was verified by git diff comparison — trust these as confirmed chang
 
     Read additional source files ONLY if they are directly relevant to identified gaps.
     Do NOT blindly read all 13+ source files -- this wastes context window.
+    You have a limited context window. Reading 5+ full source files will exceed it. Prioritize reading ONLY the 2-3 files most relevant to the top-priority gap.
 
     If the gap analysis identifies UA features to port, also read the corresponding UA source files:
     Bash("cat ${UA_PLUGIN_SRC}/context-builder.ts 2>/dev/null || echo 'not found'")
@@ -1535,7 +1540,7 @@ This data was verified by git diff comparison — trust these as confirmed chang
     verdict: report?.overallVerdict || 'unknown',
     changesSummary: improvements?.summary || '',
     workflowImprovements: workflowChanges,
-    remainingGaps: gaps.length,
+    remainingGaps: currentRemainingGaps,
     highPriorityGaps: remainingHighGaps,
     gapsClosedThisIteration,
     convergenceReason: converged ? convergenceReason : null,
@@ -1571,6 +1576,18 @@ This data was verified by git diff comparison — trust these as confirmed chang
   // from incidental changes (comments, renames, etc.)
   const gapsAddressedCount = gapsAddressedNames.length
   gapsClosedThisIteration = gapsAddressedCount > 0 ? gapsAddressedCount : (verifiedBunAppChanges > 0 ? Math.min(1, verifiedBunAppChanges) : 0)
+
+  // Decrement the running gap counter based on verified closures
+  // This prevents the stale gaps.length from being used in convergence decisions
+  if (gapsAddressedCount > 0) {
+    currentRemainingGaps = Math.max(0, currentRemainingGaps - gapsAddressedCount)
+    log(`[${iteration}] Gap counter updated: ${currentRemainingGaps} remaining (was ${currentRemainingGaps + gapsAddressedCount}, closed ${gapsAddressedCount})`)
+  } else if (verifiedBunAppChanges > 0 && currentRemainingGaps > 0) {
+    // If changes were made but not directly linked to gaps, assume at least 1 gap partially addressed
+    currentRemainingGaps = Math.max(0, currentRemainingGaps - 1)
+    log(`[${iteration}] Gap counter updated: ${currentRemainingGaps} remaining (1 indirect closure assumed from ${verifiedBunAppChanges} verified changes)`)
+  }
+
   log(`[${iteration}] Gap closure: ${gapsClosedThisIteration} gaps addressed (${gapsAddressedCount} directly targeted via file-level cross-reference, ${verifiedBunAppChanges} total verified changes)`)
   if (testCountDelta > 0) {
     log(`[${iteration}] Tests added: +${testCountDelta} (${previousMetrics?.testCount || 0} → ${totalTests})`)

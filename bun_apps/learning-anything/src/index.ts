@@ -120,6 +120,8 @@ console.log(`  POST /api/layers/detect/llm  LLM-based layer detection`);
 console.log(`  POST /api/tour/language-lesson Generate language lesson for node`);
 console.log(`  GET  /api/language/concepts  Detect language concepts across graph`);
 console.log(`  GET  /api/metrics            Request/response metrics (latency, error rate, cache)`);
+console.log(`  POST /api/ignore/generate    Generate starter .understandignore file`);
+console.log(`  POST /api/parse              Parse non-code files (YAML, JSON, Markdown)`);
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────────────
 

@@ -759,6 +759,79 @@ async function check(): Promise<QualityReport> {
     score -= excessMissing * 3;
   }
 
+  // Gate 21: Dead export detection — exported functions/classes not imported elsewhere
+  let deadExportsPass = true;
+  const deadExports: string[] = [];
+  if (existsSync(srcDir)) {
+    const srcFiles = readdirSync(srcDir)
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts") && (f as string) !== "index.ts");
+
+    // Collect all exported function/class names per file
+    const exportsByFile = new Map<string, string[]>();
+    for (const file of srcFiles) {
+      if (file === "index.ts") continue;
+      const content = readFileSync(join(srcDir, file), "utf-8");
+      const exported: string[] = [];
+      // Match: export function name, export async function name, export class Name
+      const exportRegex = /export\s+(?:async\s+)?function\s+(\w+)|export\s+class\s+(\w+)/g;
+      let m: RegExpExecArray | null;
+      while ((m = exportRegex.exec(content)) !== null) {
+        exported.push(m[1] || m[2]);
+      }
+      if (exported.length > 0) {
+        exportsByFile.set(file, exported);
+      }
+    }
+
+    // For each exported name, check if it's referenced in other src/ or __tests__/ files
+    const allSrcContent = new Map<string, string>();
+    for (const file of srcFiles) {
+      allSrcContent.set(file, readFileSync(join(srcDir, file), "utf-8"));
+    }
+    const testDir = join(srcDir, "__tests__");
+    if (existsSync(testDir)) {
+      for (const tf of readdirSync(testDir)) {
+        if (typeof tf === "string" && tf.endsWith(".ts")) {
+          allSrcContent.set(`__tests__/${tf}`, readFileSync(join(testDir, tf), "utf-8"));
+        }
+      }
+    }
+
+    for (const [file, exported] of exportsByFile) {
+      for (const name of exported) {
+        // Check if this name is referenced anywhere other than its own file
+        let referencedElsewhere = false;
+        for (const [otherFile, content] of allSrcContent) {
+          if (otherFile === file) continue; // Skip own file
+          // Check for import { name } or import name or direct usage
+          if (content.includes(name)) {
+            referencedElsewhere = true;
+            break;
+          }
+        }
+        if (!referencedElsewhere) {
+          deadExports.push(`${file}:${name}`);
+        }
+      }
+    }
+
+    deadExportsPass = deadExports.length === 0;
+    const deadExportPenalty = Math.min(10, deadExports.length * 2);
+    if (!deadExportsPass) {
+      score -= deadExportPenalty;
+    }
+
+    gates.push({
+      gate: "dead-exports",
+      passed: deadExportsPass,
+      severity: "warning",
+      message: deadExportsPass
+        ? "No dead exports detected — all exported functions/classes are referenced elsewhere"
+        : `${deadExports.length} potentially dead export(s) detected: ${deadExports.slice(0, 10).join(", ")}${deadExports.length > 10 ? "..." : ""}`,
+      detail: deadExports.length > 0 ? `Dead exports: ${deadExports.join(", ")}` : undefined,
+    });
+  }
+
   const overallPassed = score >= 60 && !gates.some(g => g.severity === "critical" && !g.passed);
 
   return {

@@ -975,7 +975,51 @@ async function benchmark(): Promise<BenchmarkReport> {
     });
     features.push({ feature: "knowledge-metadata", status: metaOk ? "present" : "missing", evidence: "KnowledgeMeta + DomainMeta in validation, onboarding, explain, context" });
 
-    // ─── HTTP Integration Tests (Runtime Tests 24-33) ─────────────────────────
+    // Runtime Test 24: normalizeNodeId and normalizeBatchOutput behavioral test
+    const rt24 = Date.now();
+    let normOk = false;
+    try {
+      const { normalizeNodeId, normalizeBatchOutput } = await import(join(ROOT, "src", "normalize.ts"));
+
+      // Test normalizeNodeId with various malformed IDs
+      const id1 = normalizeNodeId("file:src/utils//helper.ts"); // double slash
+      const id2 = normalizeNodeId("src/component.tsx"); // bare path -> should get file: prefix or stay as-is
+      const id3 = normalizeNodeId("module:name"); // already-normalized module ID
+      const id4 = normalizeNodeId("fn:auth.ts:login"); // normal function ID
+      const noDoubleSlash = !id1.includes("//");
+      const idTypesOk = typeof id1 === "string" && typeof id2 === "string" && typeof id3 === "string" && typeof id4 === "string";
+      const id4Preserved = id4 === "fn:auth.ts:login" || id4.includes("login");
+
+      // Test normalizeBatchOutput with malformed input
+      const batchResult = normalizeBatchOutput({
+        nodes: [
+          { id: "file:src//utils.ts", type: "file", name: "utils.ts", summary: "Utility functions", tags: [], complexity: "moderate" },
+          { id: "fn:index.ts:main", type: "function", name: "main", summary: "Entry point", tags: [], complexity: "simple" },
+          { id: "config:  bad id  ", type: "config", name: "config", summary: "Config", tags: [], complexity: "simple" },
+        ],
+        edges: [
+          { source: "fn:index.ts:main", target: "file:src//utils.ts", type: "depends_on" },
+        ],
+      });
+      const batchNodesOk = batchResult.nodes.length === 3;
+      const batchEdgesOk = batchResult.edges.length === 1;
+      const batchStatsOk = typeof batchResult.stats?.totalCorrections === "number";
+      const batchFixedIds = batchResult.nodes.every(n => typeof n.id === "string" && n.id.length > 0);
+
+      normOk = noDoubleSlash && idTypesOk && id4Preserved && batchNodesOk && batchEdgesOk && batchStatsOk && batchFixedIds;
+    } catch (err) {
+      normOk = false;
+    }
+    results.push({
+      name: "runtime-normalize",
+      category: "runtime",
+      passed: normOk,
+      latencyMs: Date.now() - rt24,
+      failureReason: normOk ? undefined : "normalizeNodeId / normalizeBatchOutput behavioral test failed",
+    });
+    features.push({ feature: "normalize", status: normOk ? "present" : "missing", evidence: "normalizeNodeId + normalizeBatchOutput with malformed IDs" });
+
+    // ─── HTTP Integration Tests (Runtime Tests 25-34) ─────────────────────────
     // Start a temporary Bun.serve() instance and test actual HTTP request/response cycle.
     let httpServer: any = null;
     try {

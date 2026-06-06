@@ -303,7 +303,7 @@ export function classifyError(err: unknown): ErrorInfo {
  * Wraps a handler function with error boundary logic.
  * Catches errors and returns appropriate HTTP responses.
  */
-export function errorBoundary<T>(
+function errorBoundary<T>(
   handler: () => T | Promise<T>,
   onError?: (err: unknown, info: ErrorInfo) => void,
 ): Promise<T> {

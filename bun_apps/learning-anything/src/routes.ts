@@ -18,6 +18,8 @@
  *   POST /api/analyze/architecture  — Architecture analysis
  *   POST /api/workflow/design       — Workflow design assistance
  *   POST /api/graph/reload          — Force reload graph from disk
+ *   POST /api/ignore/generate       — Generate starter .understandignore file
+ *   POST /api/parse                  — Parse non-code files (YAML, JSON, Markdown)
  */
 
 import type { GraphStore } from "./graph.js";
@@ -27,12 +29,13 @@ import type { AgentMessage } from "./agent.js";
 import { AgentError } from "./agent.js";
 import { validateGraph } from "./validate.js";
 import { requestLogger, logResponse, rateLimiter, classifyError, checkResponseCache, storeResponseCache, invalidateResponseCache, getMetrics, getCacheSize, MAX_CACHE_ENTRIES } from "./middleware.js";
-import { createIgnoreFilter } from "./ignore.js";
+import { createIgnoreFilter, generateStarterIgnoreFile } from "./ignore.js";
 import { generateHeuristicTour, type TourGroupingMode } from "./tour.js";
 import { cosineSimilarity } from "./semantic-search.js";
 import { contentHash } from "./fingerprint.js";
 import type { LLMLayerResponse } from "./layer-detector.js";
 import { normalizeBatchOutput } from "./normalize.js";
+import { autoParse, parseYamlConfig, parseJsonConfig, parseMarkdown } from "./parsers.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -580,6 +583,49 @@ const POST_ROUTES: Record<string, Handler> = {
       });
     } catch (e) {
       return error(`LLM tour generation failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/ignore/generate": async (_s, _q, body) => {
+    const validationErr = validateBody(body, []);
+    if (validationErr) return validationErr;
+    const { projectDir } = body as { projectDir?: string };
+    const dir = projectDir ?? process.cwd();
+    try {
+      const content = generateStarterIgnoreFile(dir);
+      return json({
+        content,
+        length: content.length,
+        projectDir: dir,
+      });
+    } catch (e) {
+      return error(`Starter ignore file generation failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/parse": async (_s, _q, body) => {
+    const validationErr = validateBody(body, ["filePath", "content"]);
+    if (validationErr) return validationErr;
+    const { filePath, content, parser } = body as { filePath: string; content: string; parser?: string };
+    try {
+      let result;
+      if (parser === "yaml") {
+        result = parseYamlConfig(filePath, content);
+      } else if (parser === "json") {
+        result = parseJsonConfig(filePath, content);
+      } else if (parser === "markdown") {
+        result = parseMarkdown(filePath, content);
+      } else {
+        result = autoParse(filePath, content);
+      }
+      return json({
+        nodes: result.nodes,
+        edges: result.edges,
+        nodeCount: result.nodes.length,
+        edgeCount: result.edges.length,
+      });
+    } catch (e) {
+      return error(`Parse failed: ${(e as Error).message}`, 500);
     }
   },
 };
