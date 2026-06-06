@@ -121,7 +121,9 @@ console.log(`  POST /api/tour/language-lesson Generate language lesson for node`
 console.log(`  GET  /api/language/concepts  Detect language concepts across graph`);
 console.log(`  GET  /api/metrics            Request/response metrics (latency, error rate, cache)`);
 console.log(`  POST /api/ignore/generate    Generate starter .understandignore file`);
-console.log(`  POST /api/parse              Parse non-code files (YAML, JSON, Markdown)`);
+console.log(`  POST /api/parse              Parse non-code files (YAML, JSON, Markdown)
+  POST /api/graph/scan         Scan directory for file nodes
+  POST /api/graph/resolve-imports Resolve import/export edges`);
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────────────
 

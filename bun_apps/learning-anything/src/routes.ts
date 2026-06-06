@@ -20,6 +20,8 @@
  *   POST /api/graph/reload          — Force reload graph from disk
  *   POST /api/ignore/generate       — Generate starter .understandignore file
  *   POST /api/parse                  — Parse non-code files (YAML, JSON, Markdown)
+ *   POST /api/graph/scan             — Scan directory, create file nodes + contains edges
+ *   POST /api/graph/resolve-imports  — Resolve import/export edges between file nodes
  */
 
 import type { GraphStore } from "./graph.js";
@@ -36,6 +38,7 @@ import { contentHash } from "./fingerprint.js";
 import type { LLMLayerResponse } from "./layer-detector.js";
 import { normalizeBatchOutput } from "./normalize.js";
 import { autoParse, parseYamlConfig, parseJsonConfig, parseMarkdown } from "./parsers.js";
+import { buildFileNodes, resolveImportExportEdges, type ScanOptions } from "./scan.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -626,6 +629,76 @@ const POST_ROUTES: Record<string, Handler> = {
       });
     } catch (e) {
       return error(`Parse failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/graph/scan": async (_s, _q, body, gs) => {
+    gs.ensureLoaded();
+    const validationErr = validateBody(body, ["projectDir"]);
+    if (validationErr) return validationErr;
+    const { projectDir, filePatterns, excludePatterns } = body as {
+      projectDir: string;
+      filePatterns?: string[];
+      excludePatterns?: string[];
+    };
+    try {
+      const existingNodes = gs.getNodes();
+      const options: ScanOptions = { projectDir, filePatterns, excludePatterns };
+      const result = buildFileNodes(options, existingNodes);
+
+      // Merge file nodes and contains edges into the graph
+      if (result.fileNodes.length > 0 || result.containsEdges.length > 0) {
+        gs.mergeGraphUpdate(
+          [], // Don't remove any existing nodes
+          result.fileNodes as import("./graph.js").GraphNode[],
+          result.containsEdges as import("./graph.js").GraphEdge[],
+        );
+        invalidateResponseCache();
+      }
+
+      return json({
+        status: "scanned",
+        fileNodes: result.stats.fileNodesCreated,
+        containsEdges: result.stats.containsEdgesCreated,
+        filesScanned: result.stats.filesScanned,
+        nodes: result.fileNodes,
+        edges: result.containsEdges,
+      });
+    } catch (e) {
+      return error(`Scan failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/graph/resolve-imports": async (_s, _q, body, gs) => {
+    gs.ensureLoaded();
+    const validationErr = validateBody(body, ["projectDir"]);
+    if (validationErr) return validationErr;
+    const { projectDir } = body as { projectDir: string };
+    try {
+      const existingNodes = gs.getNodes();
+      const result = resolveImportExportEdges(projectDir, existingNodes);
+
+      // Merge import/export edges into the graph
+      const allNewEdges = [...result.importEdges, ...result.exportEdges];
+      if (allNewEdges.length > 0) {
+        gs.mergeGraphUpdate(
+          [], // Don't remove any existing nodes
+          [],
+          allNewEdges as import("./graph.js").GraphEdge[],
+        );
+        invalidateResponseCache();
+      }
+
+      return json({
+        status: "resolved",
+        importsResolved: result.stats.importsResolved,
+        exportsResolved: result.stats.exportsResolved,
+        filesAnalyzed: result.stats.filesAnalyzed,
+        importEdges: result.importEdges,
+        exportEdges: result.exportEdges,
+      });
+    } catch (e) {
+      return error(`Import resolution failed: ${(e as Error).message}`, 500);
     }
   },
 };
