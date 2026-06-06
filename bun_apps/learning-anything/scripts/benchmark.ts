@@ -8,7 +8,7 @@
  * Usage: bun scripts/benchmark.ts [--json]
  */
 
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 
 const ROOT = import.meta.dir.replace(/[/\\]scripts$/, "");
@@ -1003,7 +1003,7 @@ async function benchmark(): Promise<BenchmarkReport> {
       });
       const batchNodesOk = batchResult.nodes.length === 3;
       const batchEdgesOk = batchResult.edges.length === 1;
-      const batchStatsOk = typeof batchResult.stats?.totalCorrections === "number";
+      const batchStatsOk = typeof batchResult.stats?.idsFixed === "number" && typeof batchResult.stats?.complexityFixed === "number";
       const batchFixedIds = batchResult.nodes.every(n => typeof n.id === "string" && n.id.length > 0);
 
       normOk = noDoubleSlash && idTypesOk && id4Preserved && batchNodesOk && batchEdgesOk && batchStatsOk && batchFixedIds;
@@ -1018,6 +1018,71 @@ async function benchmark(): Promise<BenchmarkReport> {
       failureReason: normOk ? undefined : "normalizeNodeId / normalizeBatchOutput behavioral test failed",
     });
     features.push({ feature: "normalize", status: normOk ? "present" : "missing", evidence: "normalizeNodeId + normalizeBatchOutput with malformed IDs" });
+
+    // Runtime Test 25: scan pipeline (buildFileNodes + resolveImportExportEdges)
+    const rt25 = Date.now();
+    let scanOk = false;
+    try {
+      const { buildFileNodes: bfn, resolveImportExportEdges: rie, buildNonCodeNodes: bncn, resolveTestEdges: rte } = await import(join(ROOT, "src", "scan.ts"));
+
+      // Create temp files for scanning
+      const scanTmpDir = join(tmpDir, "scan-test");
+      mkdirSync(scanTmpDir, { recursive: true });
+      mkdirSync(join(scanTmpDir, "src"), { recursive: true });
+      writeFileSync(join(scanTmpDir, "src", "index.ts"), "export function main() { return 1; }\n");
+      writeFileSync(join(scanTmpDir, "src", "helper.ts"), "export function helper() { return 42; }\n");
+      writeFileSync(join(scanTmpDir, "README.md"), "# Test\n\n## Section\n\nSome content.\n");
+      writeFileSync(join(scanTmpDir, "package.json"), '{ "name": "test", "version": "1.0.0" }');
+
+      const fileResult = bfn({ projectDir: scanTmpDir }, []);
+      const fileNodesOk = fileResult.fileNodes.length >= 2 && fileResult.fileNodes.every(n => n.id.startsWith("file:"));
+
+      const nonCodeResult = bncn(scanTmpDir, fileResult.fileNodes);
+      const nonCodeOk = nonCodeResult.nodes.length >= 1;
+
+      const importResult = rie(scanTmpDir, fileResult.fileNodes);
+      const importOk = typeof importResult.stats.filesAnalyzed === "number";
+
+      scanOk = fileNodesOk && importOk && nonCodeOk;
+    } catch (err) {
+      scanOk = false;
+    }
+    results.push({
+      name: "runtime-scan-pipeline",
+      category: "runtime",
+      passed: scanOk,
+      latencyMs: Date.now() - rt25,
+      failureReason: scanOk ? undefined : "Scan pipeline (buildFileNodes + resolveImportExportEdges + buildNonCodeNodes) behavioral test failed",
+    });
+    features.push({ feature: "scan-pipeline", status: scanOk ? "present" : "missing", evidence: "buildFileNodes + resolveImportExportEdges + buildNonCodeNodes with tmpdir fixtures" });
+
+    // Runtime Test 26: tested_by edge creation
+    const rt26 = Date.now();
+    let testedByOk = false;
+    try {
+      const { buildFileNodes: bfn2, resolveTestEdges: rte2 } = await import(join(ROOT, "src", "scan.ts"));
+
+      const testEdgeDir = join(tmpDir, "test-edge-test");
+      mkdirSync(testEdgeDir, { recursive: true });
+      mkdirSync(join(testEdgeDir, "src"), { recursive: true });
+      writeFileSync(join(testEdgeDir, "src", "mod.ts"), "export function mod() { return 1; }\n");
+      mkdirSync(join(testEdgeDir, "src", "__tests__"), { recursive: true });
+      writeFileSync(join(testEdgeDir, "src", "__tests__", "mod.test.ts"), 'import { mod } from "../mod"; test("mod", () => {});\n');
+
+      const fileResult2 = bfn2({ projectDir: testEdgeDir }, []);
+      const testResult = rte2(testEdgeDir, fileResult2.fileNodes);
+      testedByOk = testResult.testEdges.length >= 1 && testResult.testEdges.some(e => e.type === "tested_by");
+    } catch (err) {
+      testedByOk = false;
+    }
+    results.push({
+      name: "runtime-tested-by-edges",
+      category: "runtime",
+      passed: testedByOk,
+      latencyMs: Date.now() - rt26,
+      failureReason: testedByOk ? undefined : "resolveTestEdges (tested_by) behavioral test failed",
+    });
+    features.push({ feature: "tested-by-edges", status: testedByOk ? "present" : "missing", evidence: "resolveTestEdges creating tested_by edges from *.test.ts files" });
 
     // ─── HTTP Integration Tests (Runtime Tests 25-34) ─────────────────────────
     // Start a temporary Bun.serve() instance and test actual HTTP request/response cycle.

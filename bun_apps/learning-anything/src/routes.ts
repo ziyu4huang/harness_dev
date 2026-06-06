@@ -38,7 +38,7 @@ import { contentHash } from "./fingerprint.js";
 import type { LLMLayerResponse } from "./layer-detector.js";
 import { normalizeBatchOutput } from "./normalize.js";
 import { autoParse, parseYamlConfig, parseJsonConfig, parseMarkdown } from "./parsers.js";
-import { buildFileNodes, resolveImportExportEdges, type ScanOptions } from "./scan.js";
+import { buildFileNodes, resolveImportExportEdges, buildNonCodeNodes, resolveTestEdges, type ScanOptions } from "./scan.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -646,12 +646,42 @@ const POST_ROUTES: Record<string, Handler> = {
       const options: ScanOptions = { projectDir, filePatterns, excludePatterns };
       const result = buildFileNodes(options, existingNodes);
 
-      // Merge file nodes and contains edges into the graph
-      if (result.fileNodes.length > 0 || result.containsEdges.length > 0) {
+      // Non-code file scanning: produce document/config/service/endpoint nodes
+      const nonCodeResult = buildNonCodeNodes(projectDir, [...existingNodes, ...result.fileNodes]);
+
+      // Test edge resolution: create tested_by edges
+      const allFileNodes = [...existingNodes, ...result.fileNodes, ...nonCodeResult.nodes];
+      const testResult = resolveTestEdges(projectDir, allFileNodes);
+
+      // Merge all results into the graph
+      const allNewNodes = [
+        ...result.fileNodes,
+        ...nonCodeResult.nodes,
+        // Include test file nodes created by resolveTestEdges
+        ...(testResult.testEdges
+          .filter(e => !allFileNodes.some(n => n.id === e.target))
+          .map(e => ({
+            id: e.target,
+            type: "file" as const,
+            name: e.target.split("/").pop() ?? e.target,
+            filePath: e.target.replace(/^file:/, ""),
+            summary: `Test file`,
+            tags: ["test"],
+          }))
+        ),
+      ] as import("./graph.js").GraphNode[];
+
+      const allNewEdges = [
+        ...result.containsEdges,
+        ...nonCodeResult.edges,
+        ...testResult.testEdges,
+      ] as import("./graph.js").GraphEdge[];
+
+      if (allNewNodes.length > 0 || allNewEdges.length > 0) {
         gs.mergeGraphUpdate(
-          [], // Don't remove any existing nodes
-          result.fileNodes as import("./graph.js").GraphNode[],
-          result.containsEdges as import("./graph.js").GraphEdge[],
+          [],
+          allNewNodes,
+          allNewEdges,
         );
         invalidateResponseCache();
       }
@@ -661,8 +691,13 @@ const POST_ROUTES: Record<string, Handler> = {
         fileNodes: result.stats.fileNodesCreated,
         containsEdges: result.stats.containsEdgesCreated,
         filesScanned: result.stats.filesScanned,
-        nodes: result.fileNodes,
-        edges: result.containsEdges,
+        nonCodeNodes: nonCodeResult.stats.nodesCreated,
+        nonCodeEdges: nonCodeResult.stats.edgesCreated,
+        nonCodeFilesScanned: nonCodeResult.stats.filesScanned,
+        testedByEdges: testResult.stats.testedByEdgesCreated,
+        testFilesFound: testResult.stats.testFilesFound,
+        nodes: [...result.fileNodes, ...nonCodeResult.nodes],
+        edges: [...result.containsEdges, ...nonCodeResult.edges, ...testResult.testEdges],
       });
     } catch (e) {
       return error(`Scan failed: ${(e as Error).message}`, 500);

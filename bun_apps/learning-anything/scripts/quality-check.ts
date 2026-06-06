@@ -832,6 +832,42 @@ async function check(): Promise<QualityReport> {
     });
   }
 
+  // Gate 23: Test module coverage ratio — minimum 90% coverage threshold
+  let testModuleCoveragePass = false;
+  if (existsSync(srcDir) && existsSync(testFileCoverageDir)) {
+    const srcModules = readdirSync(srcDir)
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts") && (f as string) !== "index.ts")
+      .map((f) => f.replace(/\.ts$/, ""));
+
+    const testFiles = new Set(
+      readdirSync(testFileCoverageDir)
+        .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".test.ts"))
+        .map((f) => f.replace(/\.test\.ts$/, ""))
+    );
+
+    const allowedUncovered = new Set(["config", "index"]);
+    const coverableModules = srcModules.filter(m => !allowedUncovered.has(m));
+    const coveredModules = coverableModules.filter(m => testFiles.has(m));
+    const ratio = coverableModules.length > 0 ? Math.round((coveredModules.length / coverableModules.length) * 100) : 100;
+    testModuleCoveragePass = ratio >= 90;
+
+    const uncoveredNames = coverableModules.filter(m => !testFiles.has(m));
+
+    gates.push({
+      gate: "test-module-coverage-ratio",
+      passed: testModuleCoveragePass,
+      severity: testModuleCoveragePass ? "info" : "warning",
+      message: testModuleCoveragePass
+        ? `Test module coverage: ${ratio}% (${coveredModules.length}/${coverableModules.length} modules have test files)`
+        : `Test module coverage below 90%: ${ratio}% (${coveredModules.length}/${coverableModules.length}). Missing test files for: ${uncoveredNames.join(", ")}`,
+      detail: uncoveredNames.length > 0 ? `Modules without test files: ${uncoveredNames.join(", ")}` : undefined,
+    });
+
+    if (!testModuleCoveragePass && uncoveredNames.length > 0) {
+      score -= uncoveredNames.length * 1; // 1 point per uncovered module below threshold
+    }
+  }
+
   const overallPassed = score >= 60 && !gates.some(g => g.severity === "critical" && !g.passed);
 
   return {

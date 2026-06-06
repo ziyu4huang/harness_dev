@@ -1100,6 +1100,50 @@ This data was verified by git diff comparison — trust these as confirmed chang
   }
 
   // ====================================================================
+  // PHASE 4.6: Gap Re-verification (lightweight grep check)
+  // ====================================================================
+  // Before Reflect, verify whether previously identified gaps are still open
+  // by checking if key patterns now exist in modified source files.
+
+  let reverifiedGaps = [...gaps]
+  let gapReverificationContext = ''
+  if (gaps.length > 0 && iteration > 1) {
+    log(`[${iteration}] Re-verifying ${gaps.length} gaps against current source...`)
+    const reverifyResult = await agent(
+      `Re-verify which gaps from the gap analysis are now closed by checking the current source state.
+      For each gap below, grep for the key function/endpoint/pattern in the bun-app source.
+      A gap is "closed" if the key functionality exists and is functional.
+
+      Gaps to verify:
+      ${JSON.stringify(gaps.map(g => ({ feature: g.feature, approach: g.approach?.slice(0, 200) })), null, 2)}
+
+      For each gap, run a targeted grep in ${APP_DIR}/src/ to check if the feature exists:
+      Bash("grep -rl 'buildNonCodeNodes\\|resolveTestEdges\\|tested_by' ${APP_DIR}/src/*.ts 2>/dev/null || echo 'not found'")
+      Bash("grep -rl 'buildChatPrompt\\|buildExplainContext\\|buildDiffContext' ${APP_DIR}/src/*.ts 2>/dev/null || echo 'not found'")
+      Bash("grep -rl 'addFileWithAnalysis\\|addCallEdge\\|addNonCodeFile' ${APP_DIR}/src/*.ts 2>/dev/null || echo 'not found'")
+
+      Return: { closedGaps: [feature names that are now implemented], openGaps: [feature names still missing] }.
+      Schema: { closedGaps: [string], openGaps: [string] }`,
+      { label: `gap-reverify-${iteration}`, phase: 'Benchmark', model: 'haiku' },
+    )
+
+    const closedInReverify = reverifyResult?.closedGaps || []
+    const openInReverify = reverifyResult?.openGaps || []
+
+    if (closedInReverify.length > 0) {
+      log(`[${iteration}] Gap re-verification: ${closedInReverify.length} gaps now closed: ${closedInReverify.join(', ')}`)
+      reverifiedGaps = reverifiedGaps.filter(g => !closedInReverify.includes(g.feature))
+      currentRemainingGaps = reverifiedGaps.length
+      gapReverificationContext = `## GAP RE-VERIFICATION (pre-Reflect)
+      The following gaps were confirmed CLOSED by source-level verification: ${closedInReverify.join(', ')}
+      Remaining active gaps: ${reverifiedGaps.map(g => g.feature).join(', ') || '(none)'}
+      Use ONLY the remaining active gaps for improvement planning. Do NOT plan improvements for already-closed gaps.`
+    } else {
+      log(`[${iteration}] Gap re-verification: All ${gaps.length} gaps remain open`)
+    }
+  }
+
+  // ====================================================================
   // PHASE 5: Reflect (Opus)
   // ====================================================================
   phase('Reflect')
@@ -1124,6 +1168,8 @@ This data was verified by git diff comparison — trust these as confirmed chang
 
     ${testStagnationContext}
 
+    ${gapReverificationContext}
+
     ${previousDiffVerificationContext}
 
     ## Current Audit
@@ -1138,8 +1184,8 @@ This data was verified by git diff comparison — trust these as confirmed chang
     ${previousMetrics ? JSON.stringify(previousMetrics, null, 2) : '(first iteration)'}
 
     ## Gap Closure History (last 3 iterations)
-    ${allHistoricalRecords.slice(-3).map(r => `  Iteration ${r.iteration}: ${r.remainingGaps ?? '?'} gaps remaining, ${r.gapsClosedThisIteration ?? '?'} closed, verdict: ${r.verdict}`).join('\n') || '(no history)'}
-    Gap closure rate trend: ${allHistoricalRecords.slice(-3).filter(r => r.gapsClosedThisIteration > 0).length}/3 iterations closed gaps
+    ${[...allHistoricalRecords, ...runIterations].slice(-3).map(r => `  Iteration ${r.iteration}: ${r.remainingGaps ?? '?'} gaps remaining, ${r.gapsClosedThisIteration ?? '?'} closed, verdict: ${r.verdict}`).join('\n') || '(no history)'}
+    Gap closure rate trend: ${[...allHistoricalRecords, ...runIterations].slice(-3).filter(r => r.gapsClosedThisIteration > 0).length}/3 iterations closed gaps
 
     ## App Architecture
     The bun-app is a Bun web server at ${APP_DIR}:
@@ -1296,8 +1342,8 @@ This data was verified by git diff comparison — trust these as confirmed chang
 
     ## DIRECTIVE: GAP CLOSURE (MANDATORY)
     You MUST close at least 1 gap from the gap analysis this iteration. Pick the highest-priority gap that has effort=small. After implementing, verify the gap is closed by checking the relevant source files contain the new functionality. If no small-effort gaps remain, pick a medium-effort gap.
-    Current gaps: ${gaps.map(g => g.feature).join(', ')}
-    Small-effort gaps: ${gaps.filter(g => g.effort === 'small').map(g => g.feature).join(', ') || '(none)'}
+    Current gaps: ${reverifiedGaps.map(g => g.feature).join(', ')}
+    Small-effort gaps: ${reverifiedGaps.filter(g => g.effort === 'small').map(g => g.feature).join(', ') || '(none)'}
 
     ## STEP 0: READ CURRENT SOURCE FILES (MANDATORY)
     Before writing ANY code, you MUST read each file you plan to modify. This prevents conflicts with existing implementations.
@@ -1322,6 +1368,10 @@ This data was verified by git diff comparison — trust these as confirmed chang
 
     ## Feature Gap Analysis (DIRECTED PORTING)
     ${GAP_CONTEXT}
+
+    ${gapReverificationContext ? `## RE-VERIFIED ACTIVE GAPS (use these, NOT the original gap list)
+    ${gapReverificationContext}
+    Only target these verified-open gaps. Already-closed gaps should NOT be re-implemented.` : ''}
 
     ## UA Reference Implementations
     When porting UA features, READ the UA source files FIRST to understand the implementation:
@@ -1430,7 +1480,7 @@ This data was verified by git diff comparison — trust these as confirmed chang
     actually address a specific gap by grepping for the new function/endpoint/type in the modified files.
     If no gap was closed, flag this as a discrepancy.
     Current gap list (features that need addressing):
-    ${JSON.stringify(gaps.map(g => ({ feature: g.feature, priority: g.priority, filesToModify: g.filesToModify || [], approach: g.approach })))}
+    ${JSON.stringify(reverifiedGaps.map(g => ({ feature: g.feature, priority: g.priority, filesToModify: g.filesToModify || [], approach: g.approach })))}
 
     For each verified change (confirmed file), check if it matches any gap's filesToModify or approach description.
     List which gap features were DIRECTLY targeted by verified changes.

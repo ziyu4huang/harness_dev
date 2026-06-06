@@ -14,6 +14,7 @@
  */
 
 import type { GraphNode, GraphEdge } from "./graph.js";
+import { autoParse } from "./parsers.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,6 +47,24 @@ export interface ImportExportResult {
   };
 }
 
+export interface NonCodeScanResult {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  stats: {
+    filesScanned: number;
+    nodesCreated: number;
+    edgesCreated: number;
+  };
+}
+
+export interface TestEdgeResult {
+  testEdges: GraphEdge[];
+  stats: {
+    testFilesFound: number;
+    testedByEdgesCreated: number;
+  };
+}
+
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_FILE_PATTERNS = [
@@ -66,6 +85,37 @@ const DEFAULT_EXCLUDE_PATTERNS = [
   "**/*.d.ts",
 ];
 
+const NON_CODE_FILE_PATTERNS = [
+  "**/*.md",
+  "**/*.mdx",
+  "**/*.markdown",
+  "**/*.yaml",
+  "**/*.yml",
+  "**/*.json",
+  "**/*.toml",
+  "**/.env*",
+  "**/Dockerfile",
+  "**/docker-compose*.yml",
+];
+
+const TEST_FILE_PATTERNS = [
+  "**/*.test.ts",
+  "**/*.spec.ts",
+  "**/*.test.js",
+  "**/*.spec.js",
+];
+
+const NON_CODE_EXCLUDE_PATTERNS = [
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/.git/**",
+  "**/coverage/**",
+  "**/__tmp_*/**",
+  "**/package-lock.json",
+  "**/bun.lock",
+  "**/yarn.lock",
+];
+
 // ─── File Node Generation ─────────────────────────────────────────────────────
 
 /** Collect source files matching patterns, excluding unwanted paths. */
@@ -79,7 +129,7 @@ function collectSourceFiles(projectDir: string, filePatterns: string[], excludeP
     } catch { /* pattern may not match */ }
   }
   const excludeGlobs = excludePatterns.map(p => new Bun.Glob(p));
-  return [...allFiles].filter(filePath => !excludeGlobs.some(g => g.matchSync(filePath)));
+  return [...allFiles].filter(filePath => !excludeGlobs.some(g => g.match(filePath)));
 }
 
 /** Build a map of filePath → child nodes (function/class/method) from existing graph nodes. */
@@ -335,4 +385,140 @@ function normalizePath(path: string): string {
   }
 
   return result.join("/");
+}
+
+// ─── Non-Code File Node Generation ────────────────────────────────────────────
+
+/**
+ * Scan for non-code files (.md, .yaml, .json, .toml, .env, Dockerfile)
+ * and create document/config/service/endpoint nodes using the parsers module.
+ *
+ * This closes the gap where the bun-app produces 0 document nodes and 0
+ * config nodes, compared to UA which produces document nodes from .md files
+ * and config nodes from .yaml/.json files.
+ */
+export function buildNonCodeNodes(
+  projectDir: string,
+  existingNodes: GraphNode[],
+): NonCodeScanResult {
+  const files = collectSourceFiles(projectDir, NON_CODE_FILE_PATTERNS, NON_CODE_EXCLUDE_PATTERNS);
+
+  const allNodes: GraphNode[] = [];
+  const allEdges: GraphEdge[] = [];
+
+  // Build a set of existing node IDs to avoid duplicates
+  const existingIds = new Set(existingNodes.map(n => n.id));
+
+  const { readFileSync } = require("fs");
+  const { join } = require("path");
+
+  for (const filePath of files) {
+    try {
+      const fullPath = join(projectDir, filePath);
+      const content = readFileSync(fullPath, "utf-8");
+      const parseResult = autoParse(filePath, content);
+
+      for (const rawNode of parseResult.nodes) {
+        // Ensure node has required fields and no duplicate
+        if (!rawNode.id || existingIds.has(rawNode.id)) continue;
+        const node: GraphNode = {
+          id: rawNode.id,
+          type: rawNode.type ?? "document",
+          name: rawNode.name ?? filePath.split("/").pop() ?? filePath,
+          filePath: rawNode.filePath ?? filePath,
+          summary: rawNode.summary ?? "",
+          tags: rawNode.tags ?? [],
+        };
+        allNodes.push(node);
+        existingIds.add(node.id);
+      }
+
+      for (const rawEdge of parseResult.edges) {
+        if (!rawEdge.source || !rawEdge.target || !rawEdge.type) continue;
+        const edge: GraphEdge = {
+          source: rawEdge.source,
+          target: rawEdge.target,
+          type: rawEdge.type,
+          description: rawEdge.description ?? "",
+        };
+        allEdges.push(edge);
+      }
+    } catch {
+      // File may not be readable, skip
+    }
+  }
+
+  // Deduplicate edges
+  const seenEdges = new Set<string>();
+  const dedupedEdges = allEdges.filter(e => {
+    const key = `${e.source}|${e.target}|${e.type}`;
+    if (seenEdges.has(key)) return false;
+    seenEdges.add(key);
+    return true;
+  });
+
+  return {
+    nodes: allNodes,
+    edges: dedupedEdges,
+    stats: {
+      filesScanned: files.length,
+      nodesCreated: allNodes.length,
+      edgesCreated: dedupedEdges.length,
+    },
+  };
+}
+
+// ─── Test Edge Resolution ─────────────────────────────────────────────────────
+
+/** Derive candidate subject file paths from a test file path. */
+function deriveSubjectPaths(normalized: string, testFileName: string): string[] {
+  const subjectFileName = testFileName.replace(/\.(test|spec)\.(ts|tsx|js|jsx)$/, ".$2");
+  const testDir = normalized.includes("/") ? normalized.substring(0, normalized.lastIndexOf("/")) : "";
+  return [
+    testDir ? `${testDir}/${subjectFileName}` : subjectFileName,
+    testDir.includes("__tests__") ? `${testDir.replace(/\/__tests__$/, "")}/${subjectFileName}` : null,
+  ].filter((p): p is string => p !== null);
+}
+
+/** Find or create a file node for a test file. */
+function ensureTestFileNode(normalized: string, testFileName: string, fileNodesByPath: Map<string, GraphNode>): GraphNode {
+  let node = fileNodesByPath.get(normalized);
+  if (!node) {
+    node = { id: `file:${normalized}`, type: "file", name: testFileName, filePath: normalized, summary: `Test file: ${testFileName}`, tags: ["test", "source"] };
+    fileNodesByPath.set(normalized, node);
+  }
+  return node;
+}
+
+/**
+ * Detect test files and create 'tested_by' edges linking source nodes
+ * to their corresponding test files.
+ */
+export function resolveTestEdges(
+  projectDir: string,
+  existingNodes: GraphNode[],
+): TestEdgeResult {
+  const testFiles = collectSourceFiles(projectDir, TEST_FILE_PATTERNS, ["**/node_modules/**", "**/dist/**", "**/.git/**", "**/__tmp_*/**"]);
+  const fileNodesByPath = new Map<string, GraphNode>();
+  for (const node of existingNodes) {
+    if (node.type === "file" && node.filePath) fileNodesByPath.set(node.filePath.replace(/\\/g, "/"), node);
+  }
+
+  const testEdges: GraphEdge[] = [];
+  const seen = new Set<string>();
+
+  for (const testFilePath of testFiles) {
+    const normalized = testFilePath.replace(/\\/g, "/");
+    const testFileName = normalized.split("/").pop() ?? normalized;
+    const subjectFileNode = deriveSubjectPaths(normalized, testFileName).reduce<GraphNode | undefined>((found, p) => found ?? fileNodesByPath.get(p), undefined);
+    if (!subjectFileNode) continue;
+
+    const testFileNode = ensureTestFileNode(normalized, testFileName, fileNodesByPath);
+    const edgeKey = `${subjectFileNode.id}|${testFileNode.id}|tested_by`;
+    if (seen.has(edgeKey)) continue;
+    seen.add(edgeKey);
+    testEdges.push({ source: subjectFileNode.id, target: testFileNode.id, type: "tested_by", description: `${subjectFileNode.name} is tested by ${testFileNode.name}` });
+  }
+
+  return { testEdges, stats: { testFilesFound: testFiles.length, testedByEdgesCreated: testEdges.length } };
 }
