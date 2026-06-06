@@ -26,6 +26,7 @@ import { buildDiffContext, formatDiffAnalysis } from "./diff.js";
 import { buildOnboardingGuide } from "./onboard.js";
 import { buildLayerDetectionPrompt, parseLayerDetectionResponse, type LLMLayerResponse } from "./layer-detector.js";
 import { buildLanguageLessonPrompt, parseLanguageLessonResponse, type LanguageLessonResult } from "./language-lesson.js";
+import { buildTourGenerationPrompt, parseTourGenerationResponse, type LLMTourStep } from "./tour.js";
 import {
   buildFileAnalysisPrompt,
   buildProjectSummaryPrompt,
@@ -36,6 +37,106 @@ import {
 import { z } from "zod";
 
 // ─── Provider Setup ──────────────────────────────────────────────────────────
+
+// ─── Structured Error Types ────────────────────────────────────────────────────
+
+export class AgentError extends Error {
+  /** The function that threw (e.g. "chat", "rootCauseAnalysis") */
+  public readonly functionName: string;
+  /** Model ID that was in use when the error occurred */
+  public readonly model: string;
+  /** Token usage before failure, if available */
+  public readonly tokenUsage?: { promptTokens: number; completionTokens: number };
+  /** Whether the caller should retry */
+  public readonly retryable: boolean;
+  /** Request ID from middleware for log correlation */
+  public readonly requestId?: string;
+  /** Error category for classification */
+  public readonly category: "rate_limit" | "timeout" | "context_length" | "auth" | "server" | "unknown";
+
+  constructor(opts: {
+    message: string;
+    functionName: string;
+    model: string;
+    retryable?: boolean;
+    requestId?: string;
+    tokenUsage?: { promptTokens: number; completionTokens: number };
+    cause?: Error;
+    category?: "rate_limit" | "timeout" | "context_length" | "auth" | "server" | "unknown";
+  }) {
+    super(opts.message, { cause: opts.cause });
+    this.name = "AgentError";
+    this.functionName = opts.functionName;
+    this.model = opts.model;
+    this.retryable = opts.retryable ?? false;
+    this.requestId = opts.requestId;
+    this.tokenUsage = opts.tokenUsage;
+    this.category = opts.category ?? "unknown";
+  }
+
+  /** Serialize for JSON responses */
+  toJSON() {
+    return {
+      error: this.message,
+      name: this.name,
+      functionName: this.functionName,
+      model: this.model,
+      retryable: this.retryable,
+      category: this.category,
+      requestId: this.requestId,
+    };
+  }
+}
+
+/**
+ * Classify an unknown error into a category and retryable flag.
+ */
+function classifyAgentError(err: unknown): {
+  category: AgentError["category"];
+  retryable: boolean;
+} {
+  const msg = err instanceof Error ? err.message : String(err).toLowerCase();
+  if (msg.includes("rate limit") || msg.includes("429") || msg.includes("too many requests")) {
+    return { category: "rate_limit", retryable: true };
+  }
+  if (msg.includes("timeout") || msg.includes("timed out") || msg.includes("408") || msg.includes("aborted")) {
+    return { category: "timeout", retryable: true };
+  }
+  if (msg.includes("context length") || msg.includes("max_tokens") || msg.includes("token limit") || msg.includes("too many tokens")) {
+    return { category: "context_length", retryable: false };
+  }
+  if (msg.includes("api key") || msg.includes("unauthorized") || msg.includes("401") || msg.includes("authentication")) {
+    return { category: "auth", retryable: false };
+  }
+  if (msg.includes("500") || msg.includes("502") || msg.includes("503") || msg.includes("internal server")) {
+    return { category: "server", retryable: true };
+  }
+  return { category: "unknown", retryable: false };
+}
+
+/**
+ * Wrap an agent function call in a try/catch that converts errors to AgentError.
+ */
+function wrapAgentCall<T>(
+  fnName: string,
+  modelId: string,
+  requestId: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return fn().catch((err: unknown) => {
+    if (err instanceof AgentError) throw err;
+    const { category, retryable } = classifyAgentError(err);
+    throw new AgentError({
+      message: err instanceof Error ? err.message : String(err),
+      functionName: fnName,
+      model: modelId,
+      retryable,
+      requestId,
+      cause: err instanceof Error ? err : undefined,
+      category,
+    });
+  });
+}
 
 function createProvider() {
   const env = getEnv();
@@ -99,6 +200,8 @@ export async function chat(
   messages: AgentMessage[],
   modelKey: string = "flash",
   graphStore?: GraphStore,
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<AgentResponse> {
   const modelId = resolveModelId(modelKey);
   const model = provider()(modelId);
@@ -113,23 +216,26 @@ export async function chat(
     systemPrompt += `\n\nYou have access to the following knowledge graph context from the project being analyzed:\n\n${graphContext}`;
   }
 
-  const result = await generateText({
-    model,
-    system: systemPrompt,
-    messages: messages.map(m => ({ role: m.role, content: m.content })),
-    maxTokens: params.maxTokens,
-    temperature: params.temperature,
-    topP: params.topP,
-  });
+  return wrapAgentCall("chat", modelId, requestId, async () => {
+    const result = await generateText({
+      model,
+      system: systemPrompt,
+      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      maxTokens: params.maxTokens,
+      temperature: params.temperature,
+      topP: params.topP,
+      abortSignal: signal,
+    });
 
-  return {
-    text: result.text,
-    model: modelId,
-    usage: result.usage ? {
-      promptTokens: result.usage.promptTokens,
-      completionTokens: result.usage.completionTokens,
-    } : undefined,
-  };
+    return {
+      text: result.text,
+      model: modelId,
+      usage: result.usage ? {
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+      } : undefined,
+    };
+  });
 }
 
 /**
@@ -140,6 +246,8 @@ export async function chatStream(
   messages: AgentMessage[],
   modelKey: string = "flash",
   graphStore?: GraphStore,
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<ReadableStream> {
   const modelId = resolveModelId(modelKey);
   const model = provider()(modelId);
@@ -153,16 +261,19 @@ export async function chatStream(
     systemPrompt += `\n\n${graphContext}`;
   }
 
-  const result = streamText({
-    model,
-    system: systemPrompt,
-    messages: messages.map(m => ({ role: m.role, content: m.content })),
-    maxTokens: params.maxTokens,
-    temperature: params.temperature,
-    topP: params.topP,
-  });
+  return wrapAgentCall("chatStream", modelId, requestId, async () => {
+    const result = streamText({
+      model,
+      system: systemPrompt,
+      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      maxTokens: params.maxTokens,
+      temperature: params.temperature,
+      topP: params.topP,
+      abortSignal: signal,
+    });
 
-  return result.toTextStream();
+    return result.toTextStream();
+  });
 }
 
 /**
@@ -173,6 +284,8 @@ export async function rootCauseAnalysis(
   problem: string,
   graphStore?: GraphStore,
   modelKey: string = "pro",
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<{
   rootCause: string;
   confidence: number;
@@ -186,10 +299,11 @@ export async function rootCauseAnalysis(
 
   const graphContext = getGraphContext(problem, graphStore);
 
-  const result = await generateObject({
-    model,
-    system: SYSTEM_PROMPTS.rootCauseAnalyst,
-    prompt: `Analyze this problem and identify the root cause.
+  return wrapAgentCall("rootCauseAnalysis", modelId, requestId, async () => {
+    const result = await generateObject({
+      model,
+      system: SYSTEM_PROMPTS.rootCauseAnalyst,
+      prompt: `Analyze this problem and identify the root cause.
 
 ## Problem
 ${problem}
@@ -197,18 +311,20 @@ ${problem}
 ${graphContext ? `## Project Context (Knowledge Graph)\n${graphContext}` : ""}
 
 Provide a root cause analysis with confidence level (0-1), affected graph nodes, a suggested fix, and steps to verify.`,
-    schema: z.object({
-      rootCause: z.string().describe("The identified root cause"),
-      confidence: z.number().min(0).max(1).describe("Confidence level 0-1"),
-      affectedNodes: z.array(z.string()).describe("Graph node IDs affected by this issue"),
-      suggestedFix: z.string().describe("Suggested fix with code changes"),
-      stepsToVerify: z.array(z.string()).describe("Steps to verify the fix"),
-    }),
-    maxTokens: params.maxTokens,
-    temperature: Math.min(params.temperature, 0.2), // Cap temperature for structured outputs
-  });
+      schema: z.object({
+        rootCause: z.string().describe("The identified root cause"),
+        confidence: z.number().min(0).max(1).describe("Confidence level 0-1"),
+        affectedNodes: z.array(z.string()).describe("Graph node IDs affected by this issue"),
+        suggestedFix: z.string().describe("Suggested fix with code changes"),
+        stepsToVerify: z.array(z.string()).describe("Steps to verify the fix"),
+      }),
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature, 0.2),
+      abortSignal: signal,
+    });
 
-  return result.object;
+    return result.object;
+  });
 }
 
 /**
@@ -218,6 +334,8 @@ Provide a root cause analysis with confidence level (0-1), affected graph nodes,
 export async function analyzeArchitecture(
   graphStore: GraphStore,
   modelKey: string = "pro",
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<{
   summary: string;
   strengths: string[];
@@ -242,10 +360,11 @@ export async function analyzeArchitecture(
     sampleEdges.push(...graphStore.getEdgesForNode(n.id));
   }
 
-  const result = await generateObject({
-    model,
-    system: SYSTEM_PROMPTS.graphAnalyst,
-    prompt: `Analyze the architecture of this project based on its knowledge graph.
+  return wrapAgentCall("analyzeArchitecture", modelId, requestId, async () => {
+    const result = await generateObject({
+      model,
+      system: SYSTEM_PROMPTS.graphAnalyst,
+      prompt: `Analyze the architecture of this project based on its knowledge graph.
 
 ## Project Stats
 ${JSON.stringify(stats, null, 2)}
@@ -257,21 +376,23 @@ ${JSON.stringify(layers, null, 2)}
 ${formatGraphContext(sampleNodes, sampleEdges)}
 
 Provide an architecture analysis with layer health scores (0-100) and recommendations.`,
-    schema: z.object({
-      summary: z.string(),
-      strengths: z.array(z.string()),
-      weaknesses: z.array(z.string()),
-      layerHealth: z.record(z.object({
-        score: z.number().min(0).max(100),
-        issues: z.array(z.string()),
-      })),
-      recommendations: z.array(z.string()),
-    }),
-    maxTokens: params.maxTokens,
-    temperature: params.temperature,
-  });
+      schema: z.object({
+        summary: z.string(),
+        strengths: z.array(z.string()),
+        weaknesses: z.array(z.string()),
+        layerHealth: z.record(z.object({
+          score: z.number().min(0).max(100),
+          issues: z.array(z.string()),
+        })),
+        recommendations: z.array(z.string()),
+      }),
+      maxTokens: params.maxTokens,
+      temperature: params.temperature,
+      abortSignal: signal,
+    });
 
-  return result.object;
+    return result.object;
+  });
 }
 
 /**
@@ -282,6 +403,8 @@ export async function designWorkflow(
   goal: string,
   graphStore?: GraphStore,
   modelKey: string = "pro",
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<{
   phases: Array<{ name: string; description: string; agentType: string }>;
   qualityGates: string[];
@@ -293,10 +416,11 @@ export async function designWorkflow(
 
   const graphContext = getGraphContext(goal, graphStore);
 
-  const result = await generateObject({
-    model,
-    system: SYSTEM_PROMPTS.workflowDesigner,
-    prompt: `Design a Claude Code dynamic workflow to achieve this goal:
+  return wrapAgentCall("designWorkflow", modelId, requestId, async () => {
+    const result = await generateObject({
+      model,
+      system: SYSTEM_PROMPTS.workflowDesigner,
+      prompt: `Design a Claude Code dynamic workflow to achieve this goal:
 
 ## Goal
 ${goal}
@@ -304,20 +428,22 @@ ${goal}
 ${graphContext ? `## Project Context\n${graphContext}` : ""}
 
 Design the workflow with phases, agent types, quality gates, and risk mitigation.`,
-    schema: z.object({
-      phases: z.array(z.object({
-        name: z.string(),
-        description: z.string(),
-        agentType: z.string(),
-      })),
-      qualityGates: z.array(z.string()),
-      risks: z.array(z.string()),
-    }),
-    maxTokens: params.maxTokens,
-    temperature: Math.min(params.temperature + 0.1, 0.5), // Slightly higher for creativity in design
-  });
+      schema: z.object({
+        phases: z.array(z.object({
+          name: z.string(),
+          description: z.string(),
+          agentType: z.string(),
+        })),
+        qualityGates: z.array(z.string()),
+        risks: z.array(z.string()),
+      }),
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature + 0.1, 0.5),
+      abortSignal: signal,
+    });
 
-  return result.object;
+    return result.object;
+  });
 }
 
 /**
@@ -328,6 +454,8 @@ export async function explainNode(
   path: string,
   graphStore: GraphStore,
   modelKey: string = "pro",
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<{
   path: string;
   found: boolean;
@@ -341,27 +469,30 @@ export async function explainNode(
   const model = provider()(modelId);
   const params = getModelParams(modelKey);
 
-  const ctx = buildExplainContext(graphStore, path);
-  const prompt = formatExplainPrompt(ctx);
+  return wrapAgentCall("explainNode", modelId, requestId, async () => {
+    const ctx = buildExplainContext(graphStore, path);
+    const prompt = formatExplainPrompt(ctx);
 
-  const result = await generateObject({
-    model,
-    system: SYSTEM_PROMPTS.explainAnalyst,
-    prompt,
-    schema: z.object({
-      path: z.string(),
-      found: z.boolean(),
-      explanation: z.string().describe("Thorough explanation of the component"),
-      componentType: z.string().describe("Type of the component (function, class, file, etc.)"),
-      layerName: z.string().nullable().describe("Architectural layer this belongs to"),
-      childCount: z.number().describe("Number of child/internal components"),
-      connectionCount: z.number().describe("Number of connected external components"),
-    }),
-    maxTokens: params.maxTokens,
-    temperature: Math.min(params.temperature, 0.2),
+    const result = await generateObject({
+      model,
+      system: SYSTEM_PROMPTS.explainAnalyst,
+      prompt,
+      schema: z.object({
+        path: z.string(),
+        found: z.boolean(),
+        explanation: z.string().describe("Thorough explanation of the component"),
+        componentType: z.string().describe("Type of the component (function, class, file, etc.)"),
+        layerName: z.string().nullable().describe("Architectural layer this belongs to"),
+        childCount: z.number().describe("Number of child/internal components"),
+        connectionCount: z.number().describe("Number of connected external components"),
+      }),
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature, 0.2),
+      abortSignal: signal,
+    });
+
+    return result.object;
   });
-
-  return result.object;
 }
 
 /**
@@ -372,6 +503,8 @@ export async function analyzeDiff(
   changedFiles: string[],
   graphStore: GraphStore,
   modelKey: string = "pro",
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<{
   changedComponents: string[];
   affectedComponents: string[];
@@ -384,26 +517,29 @@ export async function analyzeDiff(
   const model = provider()(modelId);
   const params = getModelParams(modelKey);
 
-  const ctx = buildDiffContext(graphStore, changedFiles);
-  const analysis = formatDiffAnalysis(ctx);
+  return wrapAgentCall("analyzeDiff", modelId, requestId, async () => {
+    const ctx = buildDiffContext(graphStore, changedFiles);
+    const analysis = formatDiffAnalysis(ctx);
 
-  const result = await generateObject({
-    model,
-    system: SYSTEM_PROMPTS.diffAnalyst,
-    prompt: `Analyze the following change impact report and provide actionable recommendations.\n\n${analysis}`,
-    schema: z.object({
-      changedComponents: z.array(z.string()).describe("Names of directly changed components"),
-      affectedComponents: z.array(z.string()).describe("Names of potentially affected downstream components"),
-      riskLevel: z.enum(["low", "medium", "high", "critical"]).describe("Overall risk level"),
-      recommendations: z.array(z.string()).describe("Actionable recommendations for reviewers"),
-      testFocus: z.array(z.string()).describe("Areas that need focused testing"),
-      summary: z.string().describe("One-paragraph summary of the change impact"),
-    }),
-    maxTokens: params.maxTokens,
-    temperature: Math.min(params.temperature, 0.2),
+    const result = await generateObject({
+      model,
+      system: SYSTEM_PROMPTS.diffAnalyst,
+      prompt: `Analyze the following change impact report and provide actionable recommendations.\n\n${analysis}`,
+      schema: z.object({
+        changedComponents: z.array(z.string()).describe("Names of directly changed components"),
+        affectedComponents: z.array(z.string()).describe("Names of potentially affected downstream components"),
+        riskLevel: z.enum(["low", "medium", "high", "critical"]).describe("Overall risk level"),
+        recommendations: z.array(z.string()).describe("Actionable recommendations for reviewers"),
+        testFocus: z.array(z.string()).describe("Areas that need focused testing"),
+        summary: z.string().describe("One-paragraph summary of the change impact"),
+      }),
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature, 0.2),
+      abortSignal: signal,
+    });
+
+    return result.object;
   });
-
-  return result.object;
 }
 
 /**
@@ -423,6 +559,8 @@ export async function analyzeFile(
   content: string,
   graphStore?: GraphStore,
   modelKey: string = "pro",
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<LLMFileAnalysis & { model: string; usage?: { promptTokens: number; completionTokens: number } }> {
   const modelId = resolveModelId(modelKey);
   const model = provider()(modelId);
@@ -439,30 +577,33 @@ export async function analyzeFile(
 
   const prompt = buildFileAnalysisPrompt(filePath, content, projectContext);
 
-  const result = await generateObject({
-    model,
-    system: SYSTEM_PROMPTS.fileAnalyst,
-    prompt,
-    schema: z.object({
-      fileSummary: z.string().describe("Concise summary of the file"),
-      tags: z.array(z.string()).describe("Relevant tags"),
-      complexity: z.enum(["simple", "moderate", "complex"]).describe("Complexity assessment"),
-      functionSummaries: z.record(z.string(), z.string()).describe("Function name to summary map"),
-      classSummaries: z.record(z.string(), z.string()).describe("Class name to summary map"),
-      languageNotes: z.string().optional().describe("Language-specific notes"),
-    }),
-    maxTokens: params.maxTokens,
-    temperature: Math.min(params.temperature, 0.2),
-  });
+  return wrapAgentCall("analyzeFile", modelId, requestId, async () => {
+    const result = await generateObject({
+      model,
+      system: SYSTEM_PROMPTS.fileAnalyst,
+      prompt,
+      schema: z.object({
+        fileSummary: z.string().describe("Concise summary of the file"),
+        tags: z.array(z.string()).describe("Relevant tags"),
+        complexity: z.enum(["simple", "moderate", "complex"]).describe("Complexity assessment"),
+        functionSummaries: z.record(z.string(), z.string()).describe("Function name to summary map"),
+        classSummaries: z.record(z.string(), z.string()).describe("Class name to summary map"),
+        languageNotes: z.string().optional().describe("Language-specific notes"),
+      }),
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature, 0.2),
+      abortSignal: signal,
+    });
 
-  return {
-    ...result.object,
-    model: modelId,
-    usage: result.usage ? {
-      promptTokens: result.usage.promptTokens,
-      completionTokens: result.usage.completionTokens,
-    } : undefined,
-  };
+    return {
+      ...result.object,
+      model: modelId,
+      usage: result.usage ? {
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+      } : undefined,
+    };
+  });
 }
 
 /**
@@ -473,6 +614,8 @@ export async function analyzeFile(
 export async function summarizeProject(
   graphStore: GraphStore,
   modelKey: string = "pro",
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<LLMProjectSummary & { model: string; usage?: { promptTokens: number; completionTokens: number } }> {
   const modelId = resolveModelId(modelKey);
   const model = provider()(modelId);
@@ -499,31 +642,34 @@ export async function summarizeProject(
 
   const prompt = buildProjectSummaryPrompt(fileList, sampleFiles);
 
-  const result = await generateObject({
-    model,
-    system: SYSTEM_PROMPTS.projectSummarizer,
-    prompt,
-    schema: z.object({
-      description: z.string().describe("Project description (2-3 sentences)"),
-      frameworks: z.array(z.string()).describe("Detected frameworks and libraries"),
-      layers: z.array(z.object({
-        name: z.string().describe("Layer name"),
-        description: z.string().describe("Layer responsibility"),
-        filePatterns: z.array(z.string()).describe("File patterns for this layer"),
-      })).describe("Architectural layers"),
-    }),
-    maxTokens: params.maxTokens,
-    temperature: Math.min(params.temperature, 0.2),
-  });
+  return wrapAgentCall("summarizeProject", modelId, requestId, async () => {
+    const result = await generateObject({
+      model,
+      system: SYSTEM_PROMPTS.projectSummarizer,
+      prompt,
+      schema: z.object({
+        description: z.string().describe("Project description (2-3 sentences)"),
+        frameworks: z.array(z.string()).describe("Detected frameworks and libraries"),
+        layers: z.array(z.object({
+          name: z.string().describe("Layer name"),
+          description: z.string().describe("Layer responsibility"),
+          filePatterns: z.array(z.string()).describe("File patterns for this layer"),
+        })).describe("Architectural layers"),
+      }),
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature, 0.2),
+      abortSignal: signal,
+    });
 
-  return {
-    ...result.object,
-    model: modelId,
-    usage: result.usage ? {
-      promptTokens: result.usage.promptTokens,
-      completionTokens: result.usage.completionTokens,
-    } : undefined,
-  };
+    return {
+      ...result.object,
+      model: modelId,
+      usage: result.usage ? {
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+      } : undefined,
+    };
+  });
 }
 
 /**
@@ -534,6 +680,7 @@ export async function summarizeProject(
 export async function detectLayersLLM(
   graphStore: GraphStore,
   modelKey: string = "pro",
+  signal?: AbortSignal,
 ): Promise<LLMLayerResponse[]> {
   const modelId = resolveModelId(modelKey);
   const model = provider()(modelId);
@@ -542,15 +689,18 @@ export async function detectLayersLLM(
   const nodes = graphStore.getNodes();
   const prompt = buildLayerDetectionPrompt(nodes);
 
-  const result = await generateText({
-    model,
-    system: SYSTEM_PROMPTS.graphAnalyst,
-    prompt,
-    maxTokens: params.maxTokens,
-    temperature: Math.min(params.temperature, 0.3),
-  });
+  return wrapAgentCall("detectLayersLLM", modelId, undefined, async () => {
+    const result = await generateText({
+      model,
+      system: SYSTEM_PROMPTS.graphAnalyst,
+      prompt,
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature, 0.3),
+      abortSignal: signal,
+    });
 
-  return parseLayerDetectionResponse(result.text) ?? [];
+    return parseLayerDetectionResponse(result.text) ?? [];
+  });
 }
 
 /**
@@ -562,6 +712,8 @@ export async function generateLanguageLesson(
   graphStore: GraphStore,
   language: string = "TypeScript",
   modelKey: string = "pro",
+  signal?: AbortSignal,
+  requestId?: string,
 ): Promise<LanguageLessonResult & { nodeId: string; conceptsDetected: string[] }> {
   const modelId = resolveModelId(modelKey);
   const model = provider()(modelId);
@@ -576,22 +728,65 @@ export async function generateLanguageLesson(
   const conceptsDetected = detectLanguageConcepts(node);
   const prompt = buildLanguageLessonPrompt(node, edges, language);
 
-  const result = await generateText({
-    model,
-    system: SYSTEM_PROMPTS.explainAnalyst,
-    prompt,
-    maxTokens: params.maxTokens,
-    temperature: Math.min(params.temperature, 0.3),
-  });
+  return wrapAgentCall("generateLanguageLesson", modelId, requestId, async () => {
+    const result = await generateText({
+      model,
+      system: SYSTEM_PROMPTS.explainAnalyst,
+      prompt,
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature, 0.3),
+      abortSignal: signal,
+    });
 
-  const lesson = parseLanguageLessonResponse(result.text);
-  return {
-    ...lesson,
-    nodeId,
-    conceptsDetected,
-  };
+    const lesson = parseLanguageLessonResponse(result.text);
+    return {
+      ...lesson,
+      nodeId,
+      conceptsDetected,
+    };
+  });
 }
 
 // Re-export detectLanguageConcepts for convenience
 import { detectLanguageConcepts } from "./language-lesson.js";
+
+/**
+ * Generate a guided tour using LLM -- uses pro model for analysis.
+ * Sends graph nodes/edges/layers to the LLM and asks it to produce
+ * an ordered tour with semantic grouping and language lessons.
+ * Returns the LLM-provided tour steps.
+ */
+export async function detectTourLLM(
+  graphStore: GraphStore,
+  modelKey: string = "pro",
+  signal?: AbortSignal,
+): Promise<LLMTourStep[]> {
+  const modelId = resolveModelId(modelKey);
+  const model = provider()(modelId);
+  const params = getModelParams(modelKey);
+
+  const graph = graphStore.data;
+  const prompt = buildTourGenerationPrompt(
+    graph.nodes,
+    graph.edges,
+    graph.layers,
+    graph.project.name,
+    graph.project.description ?? "",
+    graph.project.languages ?? [],
+    graph.project.frameworks ?? [],
+  );
+
+  return wrapAgentCall("detectTourLLM", modelId, undefined, async () => {
+    const result = await generateText({
+      model,
+      system: SYSTEM_PROMPTS.graphAnalyst,
+      prompt,
+      maxTokens: params.maxTokens,
+      temperature: Math.min(params.temperature, 0.3),
+      abortSignal: signal,
+    });
+
+    return parseTourGenerationResponse(result.text);
+  });
+}
 

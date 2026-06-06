@@ -106,8 +106,10 @@ console.log(`  GET  /api/path?from=&to=     Path between nodes`);
 console.log(`  GET  /api/validate           Graph validation results`);
 console.log(`  POST /api/graph/reload       Reload graph from disk`);
 console.log(`  POST /api/graph/save         Save graph to disk`);
-console.log(`  POST /api/graph/merge        Merge incremental updates`);
+console.log(`  POST /api/graph/merge        Merge incremental updates
+  POST /api/graph/normalize     Normalize graph nodes/edges`);
 console.log(`  POST /api/tour/generate      Generate heuristic tour`);
+console.log(`  POST /api/tour/generate/llm  LLM-based tour generation`);
 console.log(`  GET  /api/search/semantic    Semantic search (embedding query)`);
 console.log(`  POST /api/search/semantic    Semantic search (embedding body)`);
 console.log(`  GET  /api/graph/fingerprints Inspect fingerprint store`);

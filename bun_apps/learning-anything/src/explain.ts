@@ -113,121 +113,89 @@ export function buildExplainContext(
 /**
  * Format the explain context as a structured prompt for LLM consumption.
  */
-export function formatExplainPrompt(ctx: ExplainContext): string {
-  if (!ctx.targetNode) {
-    return [
-      `# Component Not Found`,
-      ``,
-      `The path "${ctx.path}" was not found in the knowledge graph for ${ctx.projectName}.`,
-      ``,
-      `Possible reasons:`,
-      `- The file hasn't been analyzed yet — try running /understand first`,
-      `- The path may be different in the graph — check the exact file path`,
-      `- The file may have been deleted or renamed since the last analysis`,
-    ].join("\n");
+function formatExplainNotFound(ctx: ExplainContext): string {
+  return [
+    `# Component Not Found`, ``,
+    `The path "${ctx.path}" was not found in the knowledge graph for ${ctx.projectName}.`, ``,
+    `Possible reasons:`,
+    `- The file hasn't been analyzed yet — try running /understand first`,
+    `- The path may be different in the graph — check the exact file path`,
+    `- The file may have been deleted or renamed since the last analysis`,
+  ].join("\n");
+}
+
+function formatExplainRelationships(targetNode: GraphNode, childNodes: GraphNode[], connectedNodes: GraphNode[], edges: GraphEdge[]): string[] {
+  if (edges.length === 0) return [];
+  const nodeMap = new Map([targetNode, ...childNodes, ...connectedNodes].map(n => [n.id, n]));
+  const lines = ["## Relationships"];
+  for (const edge of edges) {
+    if (edge.type === "contains") continue;
+    const src = nodeMap.get(edge.source)?.name ?? edge.source;
+    const tgt = nodeMap.get(edge.target)?.name ?? edge.target;
+    const desc = edge.description ? ` — ${edge.description}` : "";
+    lines.push(`- ${src} --[${edge.type}]--> ${tgt}${desc}`);
   }
+  lines.push("");
+  return lines;
+}
+
+function formatExplainDomainMeta(node: GraphNode): string[] {
+  if (!node.domainMeta) return [];
+  const dm = node.domainMeta;
+  const lines = ["## Domain Context", `**Entities:** ${dm.entities.join(", ")}`];
+  if (dm.businessRules?.length) { lines.push("**Business Rules:**"); for (const rule of dm.businessRules) lines.push(`- ${rule}`); }
+  if (dm.crossDomainInteractions?.length) { lines.push("**Cross-Domain Interactions:**"); for (const i of dm.crossDomainInteractions) lines.push(`- ${i}`); }
+  if (dm.entryPoints?.length) lines.push(`**Entry Points:** ${dm.entryPoints.join(", ")}`);
+  lines.push("");
+  return lines;
+}
+
+function formatExplainKnowledgeMeta(node: GraphNode): string[] {
+  if (!node.knowledgeMeta) return [];
+  const km = node.knowledgeMeta;
+  const lines = ["## Knowledge Sources"];
+  if (km.authors?.length) lines.push(`**Authors:** ${km.authors.join(", ")}`);
+  if (km.publishedDate) lines.push(`**Published:** ${km.publishedDate}`);
+  if (km.source) lines.push(`**Source:** ${km.source}`);
+  if (km.citations?.length) { lines.push("**Citations:**"); for (const cite of km.citations) lines.push(`- ${cite}`); }
+  if (km.relatedTopics?.length) lines.push(`**Related Topics:** ${km.relatedTopics.join(", ")}`);
+  lines.push("");
+  return lines;
+}
+
+export function formatExplainPrompt(ctx: ExplainContext): string {
+  if (!ctx.targetNode) return formatExplainNotFound(ctx);
 
   const { targetNode, childNodes, connectedNodes, relevantEdges, layer } = ctx;
   const lines: string[] = [];
 
-  lines.push(`# Deep Dive: ${targetNode.name}`);
-  lines.push("");
+  // Header
+  lines.push(`# Deep Dive: ${targetNode.name}`, "");
   lines.push(`**Type:** ${targetNode.type} | **Complexity:** ${targetNode.complexity ?? "unknown"}`);
   if (targetNode.filePath) lines.push(`**File:** \`${targetNode.filePath}\``);
   if (targetNode.lineRange) lines.push(`**Lines:** ${targetNode.lineRange[0]}-${targetNode.lineRange[1]}`);
-  lines.push("");
-  lines.push(`**Summary:** ${targetNode.summary}`);
-  lines.push("");
+  lines.push("", `**Summary:** ${targetNode.summary}`, "");
 
-  if (layer) {
-    lines.push(`## Architectural Layer: ${layer.name}`);
-    lines.push(layer.description);
-    lines.push("");
-  }
+  // Layer
+  if (layer) lines.push(`## Architectural Layer: ${layer.name}`, layer.description, "");
 
-  if (childNodes.length > 0) {
-    lines.push("## Internal Components");
-    for (const child of childNodes) {
-      lines.push(`- **${child.name}** (${child.type}): ${child.summary}`);
-    }
-    lines.push("");
-  }
+  // Children + connections
+  if (childNodes.length > 0) { lines.push("## Internal Components"); for (const c of childNodes) lines.push(`- **${c.name}** (${c.type}): ${c.summary}`); lines.push(""); }
+  if (connectedNodes.length > 0) { lines.push("## Connected Components"); for (const n of connectedNodes) lines.push(`- **${n.name}** (${n.type}): ${n.summary}`); lines.push(""); }
 
-  if (connectedNodes.length > 0) {
-    lines.push("## Connected Components");
-    for (const node of connectedNodes) {
-      lines.push(`- **${node.name}** (${node.type}): ${node.summary}`);
-    }
-    lines.push("");
-  }
+  // Structured sections
+  lines.push(...formatExplainRelationships(targetNode, childNodes, connectedNodes, relevantEdges));
+  if (targetNode.languageNotes) lines.push("## Language Notes", targetNode.languageNotes, "");
+  lines.push(...formatExplainDomainMeta(targetNode));
+  lines.push(...formatExplainKnowledgeMeta(targetNode));
 
-  if (relevantEdges.length > 0) {
-    const nodeMap = new Map(
-      [targetNode, ...childNodes, ...connectedNodes].map(n => [n.id, n]),
-    );
-    lines.push("## Relationships");
-    for (const edge of relevantEdges) {
-      if (edge.type === "contains") continue;
-      const src = nodeMap.get(edge.source)?.name ?? edge.source;
-      const tgt = nodeMap.get(edge.target)?.name ?? edge.target;
-      const desc = edge.description ? ` — ${edge.description}` : "";
-      lines.push(`- ${src} --[${edge.type}]--> ${tgt}${desc}`);
-    }
-    lines.push("");
-  }
-
-  if (targetNode.languageNotes) {
-    lines.push("## Language Notes");
-    lines.push(targetNode.languageNotes);
-    lines.push("");
-  }
-
-  if (targetNode.domainMeta) {
-    const dm = targetNode.domainMeta;
-    lines.push("## Domain Context");
-    lines.push(`**Entities:** ${dm.entities.join(", ")}`);
-    if (dm.businessRules?.length) {
-      lines.push("**Business Rules:**");
-      for (const rule of dm.businessRules) {
-        lines.push(`- ${rule}`);
-      }
-    }
-    if (dm.crossDomainInteractions?.length) {
-      lines.push("**Cross-Domain Interactions:**");
-      for (const interaction of dm.crossDomainInteractions) {
-        lines.push(`- ${interaction}`);
-      }
-    }
-    if (dm.entryPoints?.length) {
-      lines.push(`**Entry Points:** ${dm.entryPoints.join(", ")}`);
-    }
-    lines.push("");
-  }
-
-  if (targetNode.knowledgeMeta) {
-    const km = targetNode.knowledgeMeta;
-    lines.push("## Knowledge Sources");
-    if (km.authors?.length) lines.push(`**Authors:** ${km.authors.join(", ")}`);
-    if (km.publishedDate) lines.push(`**Published:** ${km.publishedDate}`);
-    if (km.source) lines.push(`**Source:** ${km.source}`);
-    if (km.citations?.length) {
-      lines.push("**Citations:**");
-      for (const cite of km.citations) {
-        lines.push(`- ${cite}`);
-      }
-    }
-    if (km.relatedTopics?.length) lines.push(`**Related Topics:** ${km.relatedTopics.join(", ")}`);
-    lines.push("");
-  }
-
-  lines.push("## Instructions");
-  lines.push("Provide a thorough explanation of this component:");
-  lines.push("1. What it does and why it exists in the project");
-  lines.push("2. How data flows through it (inputs, processing, outputs)");
-  lines.push("3. How it interacts with connected components");
-  lines.push("4. Any patterns, idioms, or design decisions worth noting");
-  lines.push("5. Potential gotchas or areas of complexity");
-  lines.push("");
+  // Instructions
+  lines.push("## Instructions", "Provide a thorough explanation of this component:",
+    "1. What it does and why it exists in the project",
+    "2. How data flows through it (inputs, processing, outputs)",
+    "3. How it interacts with connected components",
+    "4. Any patterns, idioms, or design decisions worth noting",
+    "5. Potential gotchas or areas of complexity", "");
 
   return lines.join("\n");
 }

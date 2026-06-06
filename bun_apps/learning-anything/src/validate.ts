@@ -343,6 +343,65 @@ export function normalizeGraph(data: unknown): unknown {
 
 // ─── Tier 2: Auto-fix ───────────────────────────────────────────────────────
 
+/** Auto-fix a single node's missing/defaulted fields. */
+function fixNodeFields(node: Record<string, unknown>, i: number, issues: GraphIssue[]): Record<string, unknown> {
+  if (typeof node !== "object" || node === null) return node;
+  const n = { ...node };
+  const name = (n.name as string) || (n.id as string) || `index ${i}`;
+
+  if (!n.type || typeof n.type !== "string") {
+    n.type = "file";
+    issues.push({ level: "auto-corrected", category: "missing-field", message: `nodes[${i}] ("${name}"): missing "type" -- defaulted to "file"`, path: `nodes[${i}].type` });
+  }
+  if (!n.complexity || n.complexity === "") {
+    n.complexity = "moderate";
+    issues.push({ level: "auto-corrected", category: "missing-field", message: `nodes[${i}] ("${name}"): missing "complexity" -- defaulted to "moderate"`, path: `nodes[${i}].complexity` });
+  } else if (typeof n.complexity === "string" && n.complexity in COMPLEXITY_ALIASES) {
+    const original = n.complexity;
+    n.complexity = COMPLEXITY_ALIASES[n.complexity];
+    issues.push({ level: "auto-corrected", category: "alias", message: `nodes[${i}] ("${name}"): complexity "${original}" -- mapped to "${n.complexity}"`, path: `nodes[${i}].complexity` });
+  }
+  if (!Array.isArray(n.tags)) {
+    n.tags = [];
+    issues.push({ level: "auto-corrected", category: "missing-field", message: `nodes[${i}] ("${name}"): missing "tags" -- defaulted to []`, path: `nodes[${i}].tags` });
+  }
+  if (!n.summary || typeof n.summary !== "string") {
+    n.summary = (n.name as string) || "No summary";
+    issues.push({ level: "auto-corrected", category: "missing-field", message: `nodes[${i}] ("${name}"): missing "summary" -- defaulted to name`, path: `nodes[${i}].summary` });
+  }
+  return n;
+}
+
+/** Auto-fix a single edge's missing/defaulted fields. */
+function fixEdgeFields(edge: Record<string, unknown>, i: number, issues: GraphIssue[]): Record<string, unknown> {
+  if (typeof edge !== "object" || edge === null) return edge;
+  const e = { ...edge };
+
+  if (!e.type || typeof e.type !== "string") {
+    e.type = "depends_on";
+    issues.push({ level: "auto-corrected", category: "missing-field", message: `edges[${i}]: missing "type" -- defaulted to "depends_on"`, path: `edges[${i}].type` });
+  }
+  if (e.direction && typeof e.direction === "string" && e.direction in DIRECTION_ALIASES) {
+    const original = e.direction;
+    e.direction = DIRECTION_ALIASES[e.direction as string];
+    issues.push({ level: "auto-corrected", category: "alias", message: `edges[${i}]: direction "${original}" -- mapped to "${e.direction}"`, path: `edges[${i}].direction` });
+  }
+  if (e.weight !== undefined && e.weight !== null && typeof e.weight === "string") {
+    const parsed = parseFloat(e.weight as string);
+    if (!isNaN(parsed)) {
+      const original = e.weight;
+      e.weight = parsed;
+      issues.push({ level: "auto-corrected", category: "type-coercion", message: `edges[${i}]: weight was string "${original}" -- coerced to number`, path: `edges[${i}].weight` });
+    }
+  }
+  if (typeof e.weight === "number" && (e.weight < 0 || e.weight > 1)) {
+    const original = e.weight;
+    e.weight = Math.max(0, Math.min(1, e.weight));
+    issues.push({ level: "auto-corrected", category: "out-of-range", message: `edges[${i}]: weight ${original} clamped to ${e.weight}`, path: `edges[${i}].weight` });
+  }
+  return e;
+}
+
 export function autoFixGraph(data: Record<string, unknown>): {
   data: Record<string, unknown>;
   issues: GraphIssue[];
@@ -351,123 +410,73 @@ export function autoFixGraph(data: Record<string, unknown>): {
   const result = { ...data };
 
   if (Array.isArray(data.nodes)) {
-    result.nodes = (data.nodes as Record<string, unknown>[]).map((node, i) => {
-      if (typeof node !== "object" || node === null) return node;
-      const n = { ...node };
-      const name = (n.name as string) || (n.id as string) || `index ${i}`;
-
-      if (!n.type || typeof n.type !== "string") {
-        n.type = "file";
-        issues.push({
-          level: "auto-corrected",
-          category: "missing-field",
-          message: `nodes[${i}] ("${name}"): missing "type" -- defaulted to "file"`,
-          path: `nodes[${i}].type`,
-        });
-      }
-
-      if (!n.complexity || n.complexity === "") {
-        n.complexity = "moderate";
-        issues.push({
-          level: "auto-corrected",
-          category: "missing-field",
-          message: `nodes[${i}] ("${name}"): missing "complexity" -- defaulted to "moderate"`,
-          path: `nodes[${i}].complexity`,
-        });
-      } else if (typeof n.complexity === "string" && n.complexity in COMPLEXITY_ALIASES) {
-        const original = n.complexity;
-        n.complexity = COMPLEXITY_ALIASES[n.complexity];
-        issues.push({
-          level: "auto-corrected",
-          category: "alias",
-          message: `nodes[${i}] ("${name}"): complexity "${original}" -- mapped to "${n.complexity}"`,
-          path: `nodes[${i}].complexity`,
-        });
-      }
-
-      if (!Array.isArray(n.tags)) {
-        n.tags = [];
-        issues.push({
-          level: "auto-corrected",
-          category: "missing-field",
-          message: `nodes[${i}] ("${name}"): missing "tags" -- defaulted to []`,
-          path: `nodes[${i}].tags`,
-        });
-      }
-
-      if (!n.summary || typeof n.summary !== "string") {
-        n.summary = (n.name as string) || "No summary";
-        issues.push({
-          level: "auto-corrected",
-          category: "missing-field",
-          message: `nodes[${i}] ("${name}"): missing "summary" -- defaulted to name`,
-          path: `nodes[${i}].summary`,
-        });
-      }
-
-      return n;
-    });
+    result.nodes = (data.nodes as Record<string, unknown>[]).map((node, i) => fixNodeFields(node, i, issues));
   }
-
   if (Array.isArray(data.edges)) {
-    result.edges = (data.edges as Record<string, unknown>[]).map((edge, i) => {
-      if (typeof edge !== "object" || edge === null) return edge;
-      const e = { ...edge };
-
-      if (!e.type || typeof e.type !== "string") {
-        e.type = "depends_on";
-        issues.push({
-          level: "auto-corrected",
-          category: "missing-field",
-          message: `edges[${i}]: missing "type" -- defaulted to "depends_on"`,
-          path: `edges[${i}].type`,
-        });
-      }
-
-      if (e.direction && typeof e.direction === "string" && e.direction in DIRECTION_ALIASES) {
-        const original = e.direction;
-        e.direction = DIRECTION_ALIASES[e.direction as string];
-        issues.push({
-          level: "auto-corrected",
-          category: "alias",
-          message: `edges[${i}]: direction "${original}" -- mapped to "${e.direction}"`,
-          path: `edges[${i}].direction`,
-        });
-      }
-
-      if (e.weight !== undefined && e.weight !== null && typeof e.weight === "string") {
-        const parsed = parseFloat(e.weight as string);
-        if (!isNaN(parsed)) {
-          const original = e.weight;
-          e.weight = parsed;
-          issues.push({
-            level: "auto-corrected",
-            category: "type-coercion",
-            message: `edges[${i}]: weight was string "${original}" -- coerced to number`,
-            path: `edges[${i}].weight`,
-          });
-        }
-      }
-
-      if (typeof e.weight === "number" && (e.weight < 0 || e.weight > 1)) {
-        const original = e.weight;
-        e.weight = Math.max(0, Math.min(1, e.weight));
-        issues.push({
-          level: "auto-corrected",
-          category: "out-of-range",
-          message: `edges[${i}]: weight ${original} clamped to ${e.weight}`,
-          path: `edges[${i}].weight`,
-        });
-      }
-
-      return e;
-    });
+    result.edges = (data.edges as Record<string, unknown>[]).map((edge, i) => fixEdgeFields(edge, i, issues));
   }
-
   return { data: result, issues };
 }
 
 // ─── Full validation pipeline ───────────────────────────────────────────────
+
+/** Validate nodes array — drop invalid, return valid + issues. */
+function validateNodes(items: unknown[], issues: GraphIssue[]): z.infer<typeof GraphNodeSchema>[] {
+  const valid: z.infer<typeof GraphNodeSchema>[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const node = items[i] as Record<string, unknown>;
+    const result = GraphNodeSchema.safeParse(node);
+    if (result.success) {
+      valid.push(result.data);
+    } else {
+      const name = node?.name || node?.id || `index ${i}`;
+      issues.push({ level: "dropped", category: "invalid-node", message: `nodes[${i}] ("${name}"): ${result.error.issues[0]?.message ?? "validation failed"} -- removed`, path: `nodes[${i}]` });
+    }
+  }
+  return valid;
+}
+
+/** Validate edges array — drop invalid + check referential integrity. */
+function validateEdges(items: unknown[], nodeIds: Set<string>, issues: GraphIssue[]): z.infer<typeof GraphEdgeSchema>[] {
+  const valid: z.infer<typeof GraphEdgeSchema>[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const edge = items[i] as Record<string, unknown>;
+    const result = GraphEdgeSchema.safeParse(edge);
+    if (!result.success) {
+      issues.push({ level: "dropped", category: "invalid-edge", message: `edges[${i}]: ${result.error.issues[0]?.message ?? "validation failed"} -- removed`, path: `edges[${i}]` });
+      continue;
+    }
+    if (!nodeIds.has(result.data.source)) {
+      issues.push({ level: "dropped", category: "invalid-reference", message: `edges[${i}]: source "${result.data.source}" does not exist in nodes -- removed`, path: `edges[${i}].source` });
+      continue;
+    }
+    if (!nodeIds.has(result.data.target)) {
+      issues.push({ level: "dropped", category: "invalid-reference", message: `edges[${i}]: target "${result.data.target}" does not exist in nodes -- removed`, path: `edges[${i}].target` });
+      continue;
+    }
+    valid.push(result.data);
+  }
+  return valid;
+}
+
+/** Validate typed arrays (layers or tour) — drop invalid, filter dangling nodeIds. */
+function validateTypedArray<T>(
+  items: unknown[], schema: z.ZodSchema<T>, nodeIds: Set<string>,
+  issues: GraphIssue[], category: string, label: string,
+): T[] {
+  const valid: T[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const result = schema.safeParse(items[i]);
+    if (result.success) {
+      const data = result.data as Record<string, unknown>;
+      const filteredIds = (data.nodeIds as string[]).filter((id: string) => nodeIds.has(id));
+      valid.push({ ...result.data, nodeIds: filteredIds } as T);
+    } else {
+      issues.push({ level: "dropped", category: category as GraphIssue["category"], message: `${label}[${i}]: ${result.error.issues[0]?.message ?? "validation failed"} -- removed`, path: `${label}[${i}]` });
+    }
+  }
+  return valid;
+}
 
 export function validateGraph(data: unknown): ValidationResult {
   // Tier 4: Fatal -- not even an object
@@ -477,22 +486,15 @@ export function validateGraph(data: unknown): ValidationResult {
   }
 
   const raw = data as Record<string, unknown>;
-
-  // Tier 1: Sanitize
   const sanitized = sanitizeGraph(raw);
-
-  // Tier 1.5: Normalize type aliases
   const normalized = normalizeGraph(sanitized) as Record<string, unknown>;
-
-  // Tier 2: Auto-fix defaults and coercion
   const { data: fixed, issues } = autoFixGraph(normalized);
 
   // Tier 4: Fatal -- malformed top-level collections
-  const requiredCollections = ["nodes", "edges", "layers", "tour"] as const;
-  for (const collection of requiredCollections) {
-    if (collection in fixed && fixed[collection] !== undefined && !Array.isArray(fixed[collection])) {
-      const msg = `"${collection}" must be an array when present`;
-      issues.push({ level: "fatal", category: "invalid-collection", message: msg, path: collection });
+  for (const col of ["nodes", "edges", "layers", "tour"] as const) {
+    if (col in fixed && fixed[col] !== undefined && !Array.isArray(fixed[col])) {
+      const msg = `"${col}" must be an array when present`;
+      issues.push({ level: "fatal", category: "invalid-collection", message: msg, path: col });
       return { success: false, issues, fatal: msg };
     }
   }
@@ -504,111 +506,18 @@ export function validateGraph(data: unknown): ValidationResult {
     return { success: false, issues, fatal: msg };
   }
 
-  // Tier 3: Validate nodes individually, drop broken
-  const validNodes: z.infer<typeof GraphNodeSchema>[] = [];
-  if (Array.isArray(fixed.nodes)) {
-    for (let i = 0; i < fixed.nodes.length; i++) {
-      const node = fixed.nodes[i] as Record<string, unknown>;
-      const result = GraphNodeSchema.safeParse(node);
-      if (result.success) {
-        validNodes.push(result.data);
-      } else {
-        const name = node?.name || node?.id || `index ${i}`;
-        issues.push({
-          level: "dropped",
-          category: "invalid-node",
-          message: `nodes[${i}] ("${name}"): ${result.error.issues[0]?.message ?? "validation failed"} -- removed`,
-          path: `nodes[${i}]`,
-        });
-      }
-    }
-  }
-
-  // Tier 4: Fatal -- no valid nodes
+  // Tier 3: Validate nodes
+  const validNodes = validateNodes((fixed.nodes as unknown[]) ?? [], issues);
   if (validNodes.length === 0) {
     const msg = "No valid nodes found in knowledge graph";
     return { success: false, issues, fatal: msg };
   }
 
   // Tier 3: Validate edges + referential integrity
-  const nodeIds = new Set(validNodes.map((n) => n.id));
-  const validEdges: z.infer<typeof GraphEdgeSchema>[] = [];
-  if (Array.isArray(fixed.edges)) {
-    for (let i = 0; i < fixed.edges.length; i++) {
-      const edge = fixed.edges[i] as Record<string, unknown>;
-      const result = GraphEdgeSchema.safeParse(edge);
-      if (!result.success) {
-        issues.push({
-          level: "dropped",
-          category: "invalid-edge",
-          message: `edges[${i}]: ${result.error.issues[0]?.message ?? "validation failed"} -- removed`,
-          path: `edges[${i}]`,
-        });
-        continue;
-      }
-      if (!nodeIds.has(result.data.source)) {
-        issues.push({
-          level: "dropped",
-          category: "invalid-reference",
-          message: `edges[${i}]: source "${result.data.source}" does not exist in nodes -- removed`,
-          path: `edges[${i}].source`,
-        });
-        continue;
-      }
-      if (!nodeIds.has(result.data.target)) {
-        issues.push({
-          level: "dropped",
-          category: "invalid-reference",
-          message: `edges[${i}]: target "${result.data.target}" does not exist in nodes -- removed`,
-          path: `edges[${i}].target`,
-        });
-        continue;
-      }
-      validEdges.push(result.data);
-    }
-  }
-
-  // Validate layers (drop broken, filter dangling nodeIds)
-  const validLayers: z.infer<typeof LayerSchema>[] = [];
-  if (Array.isArray(fixed.layers)) {
-    for (let i = 0; i < (fixed.layers as unknown[]).length; i++) {
-      const result = LayerSchema.safeParse((fixed.layers as unknown[])[i]);
-      if (result.success) {
-        validLayers.push({
-          ...result.data,
-          nodeIds: result.data.nodeIds.filter((id) => nodeIds.has(id)),
-        });
-      } else {
-        issues.push({
-          level: "dropped",
-          category: "invalid-layer",
-          message: `layers[${i}]: ${result.error.issues[0]?.message ?? "validation failed"} -- removed`,
-          path: `layers[${i}]`,
-        });
-      }
-    }
-  }
-
-  // Validate tour steps (drop broken, filter dangling nodeIds)
-  const validTour: z.infer<typeof TourStepSchema>[] = [];
-  if (Array.isArray(fixed.tour)) {
-    for (let i = 0; i < (fixed.tour as unknown[]).length; i++) {
-      const result = TourStepSchema.safeParse((fixed.tour as unknown[])[i]);
-      if (result.success) {
-        validTour.push({
-          ...result.data,
-          nodeIds: result.data.nodeIds.filter((id) => nodeIds.has(id)),
-        });
-      } else {
-        issues.push({
-          level: "dropped",
-          category: "invalid-tour-step",
-          message: `tour[${i}]: ${result.error.issues[0]?.message ?? "validation failed"} -- removed`,
-          path: `tour[${i}]`,
-        });
-      }
-    }
-  }
+  const nodeIds = new Set(validNodes.map(n => n.id));
+  const validEdges = validateEdges((fixed.edges as unknown[]) ?? [], nodeIds, issues);
+  const validLayers = validateTypedArray((fixed.layers as unknown[]) ?? [], LayerSchema, nodeIds, issues, "invalid-layer", "layers");
+  const validTour = validateTypedArray((fixed.tour as unknown[]) ?? [], TourStepSchema, nodeIds, issues, "invalid-tour-step", "tour");
 
   const graph = {
     version: typeof fixed.version === "string" ? fixed.version : "1.0.0",
@@ -619,6 +528,5 @@ export function validateGraph(data: unknown): ValidationResult {
     layers: validLayers,
     tour: validTour,
   };
-
   return { success: true, data: graph, issues };
 }

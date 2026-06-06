@@ -239,6 +239,55 @@ function extractBlockContent(lines: string[], startLineIdx: number): string {
 
 // ─── Fingerprint Comparison ──────────────────────────────────────────────────
 
+/** Compare function signatures between two fingerprints. */
+function diffFunctions(oldFp: FileFingerprint, newFp: FileFingerprint): string[] {
+  const details: string[] = [];
+  const oldNames = new Set(oldFp.functions.map(f => f.name));
+  const newNames = new Set(newFp.functions.map(f => f.name));
+  for (const name of newNames) { if (!oldNames.has(name)) details.push(`new function: ${name}`); }
+  for (const name of oldNames) { if (!newNames.has(name)) details.push(`removed function: ${name}`); }
+  for (const newFn of newFp.functions) {
+    const oldFn = oldFp.functions.find(f => f.name === newFn.name);
+    if (!oldFn) continue;
+    if (JSON.stringify(oldFn.params) !== JSON.stringify(newFn.params)) details.push(`params changed: ${newFn.name}`);
+    if (oldFn.exported !== newFn.exported) details.push(`export status changed: ${newFn.name}`);
+    if (oldFn.lineCount > 0) {
+      const ratio = newFn.lineCount / oldFn.lineCount;
+      if (ratio > 1.5 || ratio < 0.5) details.push(`significant size change: ${newFn.name} (${oldFn.lineCount} -> ${newFn.lineCount} lines)`);
+    }
+  }
+  return details;
+}
+
+/** Compare class signatures between two fingerprints. */
+function diffClasses(oldFp: FileFingerprint, newFp: FileFingerprint): string[] {
+  const details: string[] = [];
+  const oldNames = new Set(oldFp.classes.map(c => c.name));
+  const newNames = new Set(newFp.classes.map(c => c.name));
+  for (const name of newNames) { if (!oldNames.has(name)) details.push(`new class: ${name}`); }
+  for (const name of oldNames) { if (!newNames.has(name)) details.push(`removed class: ${name}`); }
+  for (const newCls of newFp.classes) {
+    const oldCls = oldFp.classes.find(c => c.name === newCls.name);
+    if (!oldCls) continue;
+    if (JSON.stringify([...oldCls.methods].sort()) !== JSON.stringify([...newCls.methods].sort())) details.push(`methods changed: ${newCls.name}`);
+    if (JSON.stringify([...oldCls.properties].sort()) !== JSON.stringify([...newCls.properties].sort())) details.push(`properties changed: ${newCls.name}`);
+    if (oldCls.exported !== newCls.exported) details.push(`export status changed: ${newCls.name}`);
+  }
+  return details;
+}
+
+/** Compare import/export signatures between two fingerprints. */
+function diffImportsExports(oldFp: FileFingerprint, newFp: FileFingerprint): string[] {
+  const details: string[] = [];
+  const oldImports = oldFp.imports.map(i => `${i.source}:${[...i.specifiers].sort().join(",")}`).sort();
+  const newImports = newFp.imports.map(i => `${i.source}:${[...i.specifiers].sort().join(",")}`).sort();
+  if (JSON.stringify(oldImports) !== JSON.stringify(newImports)) details.push("imports changed");
+  const oldExports = [...oldFp.exports].sort();
+  const newExports = [...newFp.exports].sort();
+  if (JSON.stringify(oldExports) !== JSON.stringify(newExports)) details.push("exports changed");
+  return details;
+}
+
 /**
  * Compare two file fingerprints and determine the change level.
  * - NONE: identical content hash
@@ -249,100 +298,21 @@ export function compareFingerprints(
   oldFp: FileFingerprint,
   newFp: FileFingerprint,
 ): FileChangeResult {
-  const details: string[] = [];
-
-  // Fast path: identical content
   if (oldFp.contentHash === newFp.contentHash) {
     return { filePath: newFp.filePath, changeLevel: "NONE", details: [] };
   }
-
-  // Conservative path: if either fingerprint lacks structural analysis
   if (!oldFp.hasStructuralAnalysis || !newFp.hasStructuralAnalysis) {
-    return {
-      filePath: newFp.filePath,
-      changeLevel: "STRUCTURAL",
-      details: ["no structural analysis available -- conservative classification"],
-    };
+    return { filePath: newFp.filePath, changeLevel: "STRUCTURAL", details: ["no structural analysis available -- conservative classification"] };
   }
 
-  // Compare function signatures
-  const oldFuncNames = new Set(oldFp.functions.map(f => f.name));
-  const newFuncNames = new Set(newFp.functions.map(f => f.name));
+  const details = [
+    ...diffFunctions(oldFp, newFp),
+    ...diffClasses(oldFp, newFp),
+    ...diffImportsExports(oldFp, newFp),
+  ];
 
-  for (const name of newFuncNames) {
-    if (!oldFuncNames.has(name)) details.push(`new function: ${name}`);
-  }
-  for (const name of oldFuncNames) {
-    if (!newFuncNames.has(name)) details.push(`removed function: ${name}`);
-  }
-
-  // Compare shared functions for signature changes
-  for (const newFn of newFp.functions) {
-    const oldFn = oldFp.functions.find(f => f.name === newFn.name);
-    if (!oldFn) continue;
-    if (JSON.stringify(oldFn.params) !== JSON.stringify(newFn.params)) {
-      details.push(`params changed: ${newFn.name}`);
-    }
-    if (oldFn.exported !== newFn.exported) {
-      details.push(`export status changed: ${newFn.name}`);
-    }
-    if (oldFn.lineCount > 0) {
-      const ratio = newFn.lineCount / oldFn.lineCount;
-      if (ratio > 1.5 || ratio < 0.5) {
-        details.push(`significant size change: ${newFn.name} (${oldFn.lineCount} -> ${newFn.lineCount} lines)`);
-      }
-    }
-  }
-
-  // Compare class signatures
-  const oldClassNames = new Set(oldFp.classes.map(c => c.name));
-  const newClassNames = new Set(newFp.classes.map(c => c.name));
-
-  for (const name of newClassNames) {
-    if (!oldClassNames.has(name)) details.push(`new class: ${name}`);
-  }
-  for (const name of oldClassNames) {
-    if (!newClassNames.has(name)) details.push(`removed class: ${name}`);
-  }
-
-  for (const newCls of newFp.classes) {
-    const oldCls = oldFp.classes.find(c => c.name === newCls.name);
-    if (!oldCls) continue;
-    if (JSON.stringify([...oldCls.methods].sort()) !== JSON.stringify([...newCls.methods].sort())) {
-      details.push(`methods changed: ${newCls.name}`);
-    }
-    if (JSON.stringify([...oldCls.properties].sort()) !== JSON.stringify([...newCls.properties].sort())) {
-      details.push(`properties changed: ${newCls.name}`);
-    }
-    if (oldCls.exported !== newCls.exported) {
-      details.push(`export status changed: ${newCls.name}`);
-    }
-  }
-
-  // Compare imports
-  const oldImports = oldFp.imports.map(i => `${i.source}:${[...i.specifiers].sort().join(",")}`).sort();
-  const newImports = newFp.imports.map(i => `${i.source}:${[...i.specifiers].sort().join(",")}`).sort();
-  if (JSON.stringify(oldImports) !== JSON.stringify(newImports)) {
-    details.push("imports changed");
-  }
-
-  // Compare exports
-  const oldExports = [...oldFp.exports].sort();
-  const newExports = [...newFp.exports].sort();
-  if (JSON.stringify(oldExports) !== JSON.stringify(newExports)) {
-    details.push("exports changed");
-  }
-
-  if (details.length > 0) {
-    return { filePath: newFp.filePath, changeLevel: "STRUCTURAL", details };
-  }
-
-  // Content changed but structure is identical
-  return {
-    filePath: newFp.filePath,
-    changeLevel: "COSMETIC",
-    details: ["internal logic changed (no structural impact)"],
-  };
+  if (details.length > 0) return { filePath: newFp.filePath, changeLevel: "STRUCTURAL", details };
+  return { filePath: newFp.filePath, changeLevel: "COSMETIC", details: ["internal logic changed (no structural impact)"] };
 }
 
 // ─── Fingerprint Store ───────────────────────────────────────────────────────
@@ -401,6 +371,26 @@ export function buildFingerprintStore(
  * Analyze changes between current file state and stored fingerprints.
  * Returns a detailed breakdown of what changed and at what level.
  */
+/** Build a fingerprint for a changed file, using structural analysis for code files. */
+function buildFingerprintForFile(normalized: string, content: string): FileFingerprint {
+  const isCode = [".ts", ".tsx", ".js", ".jsx"].some(ext => normalized.endsWith(ext));
+  return isCode
+    ? extractFileFingerprint(normalized, content)
+    : { filePath: normalized, contentHash: contentHash(content), functions: [], classes: [], imports: [], exports: [], totalLines: content.split("\n").length, hasStructuralAnalysis: false };
+}
+
+/** Classify a single file's change status against the existing store. */
+function classifyFileChange(normalized: string, absolutePath: string, existedBefore: boolean, existingStore: FingerprintStore, projectDir: string): { change: FileChangeResult | null; category: "new" | "deleted" | "changed" | "none" } {
+  const existsNow = existsSync(absolutePath);
+  if (!existsNow) return { change: existedBefore ? { filePath: normalized, changeLevel: "STRUCTURAL", details: ["file deleted"] } : null, category: "deleted" };
+  if (!existedBefore) return { change: { filePath: normalized, changeLevel: "STRUCTURAL", details: ["new file"] }, category: "new" };
+
+  const content = readFileSync(absolutePath, "utf-8");
+  const newFp = buildFingerprintForFile(normalized, content);
+  const result = compareFingerprints(existingStore.files[normalized], newFp);
+  return { change: result, category: result.changeLevel === "NONE" ? "none" : "changed" };
+}
+
 export function analyzeChanges(
   projectDir: string,
   changedFiles: string[],
@@ -415,72 +405,20 @@ export function analyzeChanges(
 
   for (const filePath of changedFiles) {
     const normalized = filePath.replace(/\\/g, "/");
-    const absolutePath = join(projectDir, normalized);
     const existedBefore = normalized in existingStore.files;
-    const existsNow = existsSync(absolutePath);
+    const { change, category } = classifyFileChange(normalized, join(projectDir, normalized), existedBefore, existingStore, projectDir);
 
-    // File was deleted
-    if (!existsNow) {
-      if (existedBefore) {
-        deletedFiles.push(normalized);
-        fileChanges.push({
-          filePath: normalized,
-          changeLevel: "STRUCTURAL",
-          details: ["file deleted"],
-        });
-      }
-      continue;
-    }
-
-    // File is new
-    if (!existedBefore) {
-      newFiles.push(normalized);
-      fileChanges.push({
-        filePath: normalized,
-        changeLevel: "STRUCTURAL",
-        details: ["new file"],
-      });
-      continue;
-    }
-
-    // File exists in both -- compare fingerprints
-    const content = readFileSync(absolutePath, "utf-8");
-    const oldFp = existingStore.files[normalized];
-
-    let newFp: FileFingerprint;
-    if (normalized.endsWith(".ts") || normalized.endsWith(".tsx") || normalized.endsWith(".js") || normalized.endsWith(".jsx")) {
-      newFp = extractFileFingerprint(normalized, content);
-    } else {
-      newFp = {
-        filePath: normalized,
-        contentHash: contentHash(content),
-        functions: [],
-        classes: [],
-        imports: [],
-        exports: [],
-        totalLines: content.split("\n").length,
-        hasStructuralAnalysis: false,
-      };
-    }
-
-    const result = compareFingerprints(oldFp, newFp);
-    fileChanges.push(result);
-
-    switch (result.changeLevel) {
-      case "NONE": unchangedFiles.push(normalized); break;
-      case "COSMETIC": cosmeticOnlyFiles.push(normalized); break;
-      case "STRUCTURAL": structurallyChangedFiles.push(normalized); break;
+    if (change) fileChanges.push(change);
+    if (category === "deleted" && existedBefore) deletedFiles.push(normalized);
+    else if (category === "new") newFiles.push(normalized);
+    else if (change) {
+      if (change.changeLevel === "NONE") unchangedFiles.push(normalized);
+      else if (change.changeLevel === "COSMETIC") cosmeticOnlyFiles.push(normalized);
+      else structurallyChangedFiles.push(normalized);
     }
   }
 
-  return {
-    fileChanges,
-    newFiles,
-    deletedFiles,
-    structurallyChangedFiles,
-    cosmeticOnlyFiles,
-    unchangedFiles,
-  };
+  return { fileChanges, newFiles, deletedFiles, structurallyChangedFiles, cosmeticOnlyFiles, unchangedFiles };
 }
 
 // ─── Persistence ─────────────────────────────────────────────────────────────

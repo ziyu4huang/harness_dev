@@ -7,6 +7,104 @@
  */
 
 import type { GraphStore } from "./graph.js";
+import type { GraphNode, GraphLayer, GraphTour as TourStep } from "./graph.js";
+
+// ─── Section Formatters ────────────────────────────────────────────────────
+
+function formatOverview(name: string, description: string, languages: string[], frameworks: string[], nodeCount: number, edgeCount: number, analyzedAt: string): string[] {
+  return [
+    `# ${name}`, "",
+    `> ${description}`, "",
+    "| | |", "|---|---|",
+    `| **Languages** | ${languages.join(", ")} |`,
+    `| **Frameworks** | ${frameworks.join(", ")} |`,
+    `| **Components** | ${nodeCount} nodes, ${edgeCount} relationships |`,
+    `| **Last Analyzed** | ${analyzedAt} |`, "",
+  ];
+}
+
+function formatArchitecture(layers: GraphLayer[], nodes: GraphNode[]): string[] {
+  if (layers.length === 0) return [];
+  const lines = ["## Architecture", "", "The project is organized into the following layers:", ""];
+  for (const layer of layers) {
+    const memberNames = layer.nodeIds.map(id => nodes.find(n => n.id === id)?.name).filter(Boolean);
+    lines.push(`### ${layer.name}`, "", layer.description, "");
+    if (memberNames.length > 0) lines.push(`Key components: ${memberNames.join(", ")}`, "");
+  }
+  return lines;
+}
+
+function formatKeyConcepts(nodes: GraphNode[]): string[] {
+  const conceptNodes = nodes.filter(n => n.type === "concept");
+  if (conceptNodes.length === 0) return [];
+  const lines = ["## Key Concepts", "", "Important architectural and domain concepts to understand:", ""];
+  for (const concept of conceptNodes) lines.push(`### ${concept.name}`, "", concept.summary, "");
+  return lines;
+}
+
+function formatTour(tour: TourStep[], nodes: GraphNode[]): string[] {
+  if (tour.length === 0) return [];
+  const lines = ["## Getting Started", "", "Follow this guided tour to understand the codebase:", ""];
+  for (const step of tour) {
+    const stepNodes = step.nodeIds.map(id => nodes.find(n => n.id === id)).filter(Boolean);
+    lines.push(`### ${step.order}. ${step.title}`, "", step.description, "");
+    if (stepNodes.length > 0) {
+      lines.push("**Files to look at:**");
+      for (const node of stepNodes) { if (node!.filePath) lines.push(`- \`${node!.filePath}\` — ${node!.summary}`); }
+      lines.push("");
+    }
+    if (step.languageLesson) lines.push(`> **Language Tip:** ${step.languageLesson}`, "");
+  }
+  return lines;
+}
+
+function formatFileMap(nodes: GraphNode[]): string[] {
+  const fileNodes = nodes.filter(n => n.type === "file" && n.filePath);
+  if (fileNodes.length === 0) return [];
+  const lines = ["## File Map", "", "| File | Purpose | Complexity |", "|------|---------|------------|"];
+  for (const node of fileNodes) lines.push(`| \`${node.filePath}\` | ${node.summary} | ${node.complexity ?? "—"} |`);
+  lines.push("");
+  return lines;
+}
+
+function formatHotspots(nodes: GraphNode[]): string[] {
+  const complexNodes = nodes.filter(n => n.complexity === "complex");
+  if (complexNodes.length === 0) return [];
+  const lines = ["## Complexity Hotspots", "", "These components are the most complex and deserve extra attention:", ""];
+  for (const node of complexNodes) lines.push(`- **${node.name}** (${node.type}): ${node.summary}`);
+  lines.push("");
+  return lines;
+}
+
+function formatDomainEntities(nodes: GraphNode[]): string[] {
+  const domainNodes = nodes.filter(n => n.domainMeta);
+  if (domainNodes.length === 0) return [];
+  const lines = ["## Domain Entities", ""];
+  for (const node of domainNodes) {
+    const dm = node.domainMeta!;
+    lines.push(`### ${node.name}`, "", node.summary, "", `**Entities:** ${dm.entities.join(", ")}`);
+    if (dm.businessRules?.length) { lines.push("", "**Business Rules:**"); for (const rule of dm.businessRules) lines.push(`- ${rule}`); }
+    if (dm.crossDomainInteractions?.length) lines.push("", `**Cross-Domain Interactions:** ${dm.crossDomainInteractions.join("; ")}`);
+    if (dm.entryPoints?.length) lines.push("", `**Entry Points:** ${dm.entryPoints.join(", ")}`);
+    lines.push("");
+  }
+  return lines;
+}
+
+function formatKnowledgeSources(nodes: GraphNode[]): string[] {
+  const knowledgeNodes = nodes.filter(n => n.knowledgeMeta);
+  if (knowledgeNodes.length === 0) return [];
+  const lines = ["## Knowledge Sources", "", "Key references and knowledge artifacts:", ""];
+  for (const node of knowledgeNodes) {
+    const km = node.knowledgeMeta!;
+    lines.push(`- **${node.name}** (${node.type}): ${node.summary}`);
+    if (km.authors?.length) lines.push(`  - Authors: ${km.authors.join(", ")}`);
+    if (km.source) lines.push(`  - Source: ${km.source}`);
+    if (km.publishedDate) lines.push(`  - Published: ${km.publishedDate}`);
+  }
+  lines.push("");
+  return lines;
+}
 
 // ─── Guide Builder ──────────────────────────────────────────────────────────
 
@@ -17,167 +115,20 @@ import type { GraphStore } from "./graph.js";
 export function buildOnboardingGuide(graphStore: GraphStore): string {
   const graph = graphStore.data;
   const { project, nodes, edges, layers, tour } = graph;
-  const lines: string[] = [];
 
-  // --- Project Overview ---
-  lines.push(`# ${project.name}`);
-  lines.push("");
-  lines.push(`> ${project.description}`);
-  lines.push("");
-  lines.push("| | |");
-  lines.push("|---|---|");
-  lines.push(`| **Languages** | ${project.languages.join(", ")} |`);
-  lines.push(`| **Frameworks** | ${project.frameworks.join(", ")} |`);
-  lines.push(`| **Components** | ${nodes.length} nodes, ${edges.length} relationships |`);
-  lines.push(`| **Last Analyzed** | ${project.analyzedAt} |`);
-  lines.push("");
-
-  // --- Architecture ---
-  if (layers.length > 0) {
-    lines.push("## Architecture");
-    lines.push("");
-    lines.push("The project is organized into the following layers:");
-    lines.push("");
-
-    for (const layer of layers) {
-      const memberNames = layer.nodeIds
-        .map(id => nodes.find(n => n.id === id)?.name)
-        .filter(Boolean);
-      lines.push(`### ${layer.name}`);
-      lines.push("");
-      lines.push(layer.description);
-      lines.push("");
-      if (memberNames.length > 0) {
-        lines.push(`Key components: ${memberNames.join(", ")}`);
-        lines.push("");
-      }
-    }
-  }
-
-  // --- Key Concepts ---
-  const conceptNodes = nodes.filter(n => n.type === "concept");
-  if (conceptNodes.length > 0) {
-    lines.push("## Key Concepts");
-    lines.push("");
-    lines.push("Important architectural and domain concepts to understand:");
-    lines.push("");
-    for (const concept of conceptNodes) {
-      lines.push(`### ${concept.name}`);
-      lines.push("");
-      lines.push(concept.summary);
-      lines.push("");
-    }
-  }
-
-  // --- Getting Started (Tour) ---
-  if (tour.length > 0) {
-    lines.push("## Getting Started");
-    lines.push("");
-    lines.push("Follow this guided tour to understand the codebase:");
-    lines.push("");
-    for (const step of tour) {
-      const stepNodes = step.nodeIds
-        .map(id => nodes.find(n => n.id === id))
-        .filter(Boolean);
-      lines.push(`### ${step.order}. ${step.title}`);
-      lines.push("");
-      lines.push(step.description);
-      lines.push("");
-      if (stepNodes.length > 0) {
-        lines.push("**Files to look at:**");
-        for (const node of stepNodes) {
-          if (node!.filePath) {
-            lines.push(`- \`${node!.filePath}\` — ${node!.summary}`);
-          }
-        }
-        lines.push("");
-      }
-      if (step.languageLesson) {
-        lines.push(`> **Language Tip:** ${step.languageLesson}`);
-        lines.push("");
-      }
-    }
-  }
-
-  // --- File Map ---
-  const fileNodes = nodes.filter(n => n.type === "file" && n.filePath);
-  if (fileNodes.length > 0) {
-    lines.push("## File Map");
-    lines.push("");
-    lines.push("| File | Purpose | Complexity |");
-    lines.push("|------|---------|------------|");
-    for (const node of fileNodes) {
-      lines.push(`| \`${node.filePath}\` | ${node.summary} | ${node.complexity ?? "—"} |`);
-    }
-    lines.push("");
-  }
-
-  // --- Complexity Hotspots ---
-  const complexNodes = nodes.filter(n => n.complexity === "complex");
-  if (complexNodes.length > 0) {
-    lines.push("## Complexity Hotspots");
-    lines.push("");
-    lines.push("These components are the most complex and deserve extra attention:");
-    lines.push("");
-    for (const node of complexNodes) {
-      lines.push(`- **${node.name}** (${node.type}): ${node.summary}`);
-    }
-    lines.push("");
-  }
-
-  // --- Domain Entities ---
-  const domainNodes = nodes.filter(n => n.domainMeta);
-  if (domainNodes.length > 0) {
-    lines.push("## Domain Entities");
-    lines.push("");
-    for (const node of domainNodes) {
-      const dm = node.domainMeta!;
-      lines.push(`### ${node.name}`);
-      lines.push("");
-      lines.push(node.summary);
-      lines.push("");
-      lines.push(`**Entities:** ${dm.entities.join(", ")}`);
-      if (dm.businessRules?.length) {
-        lines.push("");
-        lines.push("**Business Rules:**");
-        for (const rule of dm.businessRules) {
-          lines.push(`- ${rule}`);
-        }
-      }
-      if (dm.crossDomainInteractions?.length) {
-        lines.push("");
-        lines.push(`**Cross-Domain Interactions:** ${dm.crossDomainInteractions.join("; ")}`);
-      }
-      if (dm.entryPoints?.length) {
-        lines.push("");
-        lines.push(`**Entry Points:** ${dm.entryPoints.join(", ")}`);
-      }
-      lines.push("");
-    }
-  }
-
-  // --- Knowledge Sources ---
-  const knowledgeNodes = nodes.filter(n => n.knowledgeMeta);
-  if (knowledgeNodes.length > 0) {
-    lines.push("## Knowledge Sources");
-    lines.push("");
-    lines.push("Key references and knowledge artifacts:");
-    lines.push("");
-    for (const node of knowledgeNodes) {
-      const km = node.knowledgeMeta!;
-      lines.push(`- **${node.name}** (${node.type}): ${node.summary}`);
-      if (km.authors?.length) lines.push(`  - Authors: ${km.authors.join(", ")}`);
-      if (km.source) lines.push(`  - Source: ${km.source}`);
-      if (km.publishedDate) lines.push(`  - Published: ${km.publishedDate}`);
-    }
-    lines.push("");
-  }
-
-  // --- Footer ---
-  lines.push("---");
-  lines.push("");
-  lines.push(`*Generated by learning-anything from knowledge graph v${graph.version}*`);
-  lines.push("");
+  const lines: string[] = [
+    ...formatOverview(project.name, project.description, project.languages, project.frameworks, nodes.length, edges.length, project.analyzedAt),
+    ...formatArchitecture(layers, nodes),
+    ...formatKeyConcepts(nodes),
+    ...formatTour(tour, nodes),
+    ...formatFileMap(nodes),
+    ...formatHotspots(nodes),
+    ...formatDomainEntities(nodes),
+    ...formatKnowledgeSources(nodes),
+    "---", "",
+    `*Generated by learning-anything from knowledge graph v${graph.version}*`,
+    "",
+  ];
 
   return lines.join("\n");
 }

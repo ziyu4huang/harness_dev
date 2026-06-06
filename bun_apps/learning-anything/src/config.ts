@@ -84,6 +84,7 @@ export const LIMITS = {
   agentTimeoutMs: 120_000,
   requestTimeoutMs: 30_000,
   maxContextNodes: 50,
+  maxBodySizeBytes: 10_485_760, // 10 MB — reject oversized JSON bodies before parsing
 } as const;
 
 // ─── System Prompts ──────────────────────────────────────────────────────────

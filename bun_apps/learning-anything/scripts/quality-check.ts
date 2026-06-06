@@ -125,6 +125,7 @@ async function check(): Promise<QualityReport> {
     "src/change-classifier.ts",
     "src/layer-detector.ts",
     "src/language-lesson.ts",
+    "src/normalize.ts",
   ];
   const missingSrc = expectedFiles.filter(f => !existsSync(join(ROOT, f)));
   gates.push({
@@ -200,7 +201,7 @@ async function check(): Promise<QualityReport> {
   if (existsSync(srcDir)) {
     const builtins = new Set(["fs", "path", "http", "https", "url", "stream", "crypto", "os", "util", "events", "buffer", "child_process", "net", "tls", "zlib", "assert", "process", "bun"]);
     const allSrcFiles = readdirSync(srcDir, { recursive: true })
-      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts"))
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts") && !(f as string).includes("__tests__"))
       .map((f) => join(srcDir, f));
 
     for (const file of allSrcFiles) {
@@ -453,6 +454,310 @@ async function check(): Promise<QualityReport> {
     ].join("\n"),
   });
   score -= (missingFromBanner.length + staleBannerEntries.length) * 2;
+
+  // Gate 16: Route consistency — no route path appears in both GET and POST routes
+  let routeOverlapPass = true;
+  let overlappingRoutes: string[] = [];
+  if (existsSync(routesFile)) {
+    const routesContent = readFileSync(routesFile, "utf-8");
+
+    // Extract GET route keys
+    const getRoutesRe = /GET_ROUTES\s*[:=]\s*\{([^}]+)\}/s;
+    const getMatch = getRoutesRe.exec(routesContent);
+    const getKeys = new Set<string>();
+    if (getMatch) {
+      const inner = getMatch[1];
+      const keyRe = /"([^"]+)"/g;
+      let km: RegExpExecArray | null;
+      while ((km = keyRe.exec(inner)) !== null) {
+        getKeys.add(km[1]);
+      }
+    }
+
+    // Extract POST route keys
+    const postRoutesRe = /POST_ROUTES\s*[:=]\s*\{([^}]+)\}/s;
+    const postMatch = postRoutesRe.exec(routesContent);
+    const postKeys = new Set<string>();
+    if (postMatch) {
+      const inner = postMatch[1];
+      const keyRe = /"([^"]+)"/g;
+      let km: RegExpExecArray | null;
+      while ((km = keyRe.exec(inner)) !== null) {
+        postKeys.add(km[1]);
+      }
+    }
+
+    // Check for overlaps
+    for (const key of getKeys) {
+      if (postKeys.has(key)) {
+        overlappingRoutes.push(key);
+      }
+    }
+    routeOverlapPass = overlappingRoutes.length === 0;
+  }
+  gates.push({
+    gate: "route-consistency",
+    passed: routeOverlapPass,
+    severity: "warning",
+    message: routeOverlapPass
+      ? "No overlapping GET/POST route paths"
+      : `${overlappingRoutes.length} route(s) appear in both GET and POST routes: ${overlappingRoutes.join(", ")}`,
+    detail: overlappingRoutes.join(", "),
+  });
+  score -= overlappingRoutes.length * 3;
+
+  // Gate 17: Body validation — POST handlers that expect JSON should call validateBody
+  let bodyValidationPass = true;
+  let missingValidationRoutes: string[] = [];
+  if (existsSync(routesFile)) {
+    const routesContent = readFileSync(routesFile, "utf-8");
+
+    // Find all POST route keys
+    const postRouteKeyRe = /"(api\/[^"]+)"\s*:\s*async/g;
+    const postSectionStart = routesContent.indexOf("POST_ROUTES");
+    if (postSectionStart >= 0) {
+      const postSection = routesContent.slice(postSectionStart);
+      let prMatch: RegExpExecArray | null;
+      const postRouteEntries: { key: string; handlerBody: string }[] = [];
+
+      // Extract each POST handler block
+      const handlerBlockRe = /"(api\/[^"]+)"\s*:\s*async\s*\([^)]*\)\s*=>\s*\{/g;
+      handlerBlockRe.lastIndex = 0;
+      while ((prMatch = handlerBlockRe.exec(postSection)) !== null) {
+        const key = prMatch[1];
+        // Find the matching closing brace (depth tracking)
+        const startIdx = prMatch.index + prMatch[0].length - 1;
+        let depth = 0;
+        let endIdx = startIdx;
+        for (let i = startIdx; i < postSection.length; i++) {
+          if (postSection[i] === "{") depth++;
+          if (postSection[i] === "}") { depth--; if (depth === 0) { endIdx = i; break; } }
+        }
+        const handlerBody = postSection.slice(startIdx, endIdx);
+        postRouteEntries.push({ key, handlerBody });
+      }
+
+      // Check handlers that have a body parameter for validateBody calls
+      // Skip routes that are clearly non-body routes (reload, save, etc.)
+      const noValidationNeeded = new Set([
+        "api/graph/reload", "api/graph/save",
+        "api/tour/generate", "api/layers/detect/llm",
+        "api/analyze/architecture", "api/analyze/project-summary",
+        "api/tour/generate/llm",
+      ]);
+      for (const entry of postRouteEntries) {
+        if (noValidationNeeded.has(entry.key)) continue;
+        // If the handler references "body" or has a destructured body, check for validateBody
+        if (entry.handlerBody.includes("body") && !entry.handlerBody.includes("validateBody")) {
+          missingValidationRoutes.push(entry.key);
+        }
+      }
+    }
+    bodyValidationPass = missingValidationRoutes.length === 0;
+  }
+  gates.push({
+    gate: "body-validation",
+    passed: bodyValidationPass,
+    severity: "warning",
+    message: bodyValidationPass
+      ? "All POST handlers validate request body when expected"
+      : `${missingValidationRoutes.length} POST handler(s) reference body without validateBody: ${missingValidationRoutes.join(", ")}`,
+    detail: missingValidationRoutes.join(", "),
+  });
+  score -= missingValidationRoutes.length * 2;
+
+  // Gate 18: Benchmark POST endpoint coverage
+  // Verify that benchmark.ts has runtime tests for POST endpoints, not just GET endpoints.
+  let postCoveragePass = false;
+  let postTestCount = 0;
+  const benchmarkFile = join(ROOT, "scripts", "benchmark.ts");
+  if (existsSync(benchmarkFile)) {
+    const benchmarkContent = readFileSync(benchmarkFile, "utf-8");
+    // Count test entries that reference POST endpoints (by name pattern or path)
+    const postTestPatterns = [
+      /schema-post-/g,
+      /http-post-/g,
+      /name:\s*["'].*post.*["']/gi,
+      /fetchEndpoint\(["']POST["']/g,
+    ];
+    const postMatches = new Set<string>();
+    for (const pattern of postTestPatterns) {
+      pattern.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(benchmarkContent)) !== null) {
+        postMatches.add(match[0]);
+      }
+    }
+    postTestCount = postMatches.size;
+    postCoveragePass = postTestCount >= 3;
+  }
+  gates.push({
+    gate: "benchmark-post-coverage",
+    passed: postCoveragePass,
+    severity: "warning",
+    message: postCoveragePass
+      ? `Benchmark has ${postTestCount} POST endpoint test references (>= 3 required)`
+      : `Benchmark has only ${postTestCount} POST endpoint test references (need >= 3). Add schema tests for POST endpoints like /api/graph/merge, /api/graph/normalize, /api/tour/generate.`,
+    detail: `${postTestCount} POST test references found`,
+  });
+  if (!postCoveragePass) score -= 5;
+
+  // Gate 19: Circular import detection — detect cycles in internal module dependency graph
+  let circularImportPass = true;
+  let circularPaths: string[] = [];
+  let excessiveFanIn: string[] = [];
+  if (existsSync(srcDir)) {
+    const IMPORT_REL_RE = /from\s+['"](\.\/[^'"]+|\.?\.\.\/[^'"]+)['"]/g;
+    const srcFilesForImports = readdirSync(srcDir)
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts"))
+      .map((f) => ({ file: f, fullPath: join(srcDir, f) }));
+
+    // Build adjacency list
+    const adj = new Map<string, Set<string>>();
+    for (const { file, fullPath } of srcFilesForImports) {
+      const content = readFileSync(fullPath, "utf-8");
+      const deps = new Set<string>();
+      let m: RegExpExecArray | null;
+      IMPORT_REL_RE.lastIndex = 0;
+      while ((m = IMPORT_REL_RE.exec(content)) !== null) {
+        // Normalize: strip .js/.ts extension, resolve relative paths
+        let dep = m[1].replace(/\.(js|ts)$/, "");
+        // For same-dir imports (./xxx), just use the module name
+        if (dep.startsWith("./")) dep = dep.slice(2);
+        else if (dep.startsWith("../")) {
+          // For parent dir imports, keep as-is (these go outside src/)
+          continue;
+        }
+        deps.add(dep);
+      }
+      adj.set(file.replace(/\.ts$/, ""), deps);
+    }
+
+    // DFS cycle detection
+    const visited = new Set<string>();
+    const stack = new Set<string>();
+    const path: string[] = [];
+
+    function dfs(node: string): boolean {
+      if (stack.has(node)) {
+        // Found cycle — extract cycle path
+        const cycleStart = path.indexOf(node);
+        if (cycleStart >= 0) {
+          const cycle = [...path.slice(cycleStart), node].join(" -> ");
+          circularPaths.push(cycle);
+        }
+        return true;
+      }
+      if (visited.has(node)) return false;
+      visited.add(node);
+      stack.add(node);
+      path.push(node + ".ts");
+      const deps = adj.get(node);
+      if (deps) {
+        for (const dep of deps) {
+          if (adj.has(dep)) { // Only check modules within src/
+            dfs(dep);
+          }
+        }
+      }
+      path.pop();
+      stack.delete(node);
+      return false;
+    }
+
+    for (const node of adj.keys()) {
+      if (!visited.has(node)) dfs(node);
+    }
+
+    // Check for excessive fan-in (>8 imports from other src/ modules)
+    const reverseFanIn = new Map<string, number>();
+    for (const [, deps] of adj) {
+      for (const dep of deps) {
+        if (adj.has(dep)) {
+          reverseFanIn.set(dep, (reverseFanIn.get(dep) ?? 0) + 1);
+        }
+      }
+    }
+    for (const [mod, count] of reverseFanIn) {
+      if (count > 8) {
+        excessiveFanIn.push(`${mod}.ts (${count} incoming imports)`);
+      }
+    }
+
+    circularImportPass = circularPaths.length === 0;
+  }
+  gates.push({
+    gate: "circular-import-detection",
+    passed: circularImportPass,
+    severity: circularPaths.length > 0 ? "critical" : excessiveFanIn.length > 0 ? "warning" : "info",
+    message: circularImportPass
+      ? (excessiveFanIn.length > 0
+        ? `No circular imports detected (${excessiveFanIn.length} modules with >8 incoming imports: ${excessiveFanIn.join(", ")})`
+        : "No circular imports detected")
+      : `${circularPaths.length} circular import cycle(s) detected: ${circularPaths.join("; ")}`,
+    detail: [...circularPaths, ...excessiveFanIn.map(e => `High fan-in: ${e}`)].join("\n"),
+  });
+  score -= circularPaths.length * 15; // 15 points per cycle
+  // Fan-in is informational — high fan-in is expected for central modules like graph.ts
+
+  // Gate 20: Test-file-per-module coverage — each source module should have a test file
+  let testFileCoveragePass = false;
+  const modulesWithoutTests: string[] = [];
+  const testFileCoverageDir = join(ROOT, "src", "__tests__");
+  if (existsSync(srcDir) && existsSync(testFileCoverageDir)) {
+    // List source modules (excluding __tests__ subdirectory and index.ts)
+    const srcModules = readdirSync(srcDir)
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts") && (f as string) !== "index.ts")
+      .map((f) => f.replace(/\.ts$/, ""));
+
+    // List test files
+    const testFiles = new Set(
+      readdirSync(testFileCoverageDir)
+        .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".test.ts"))
+        .map((f) => f.replace(/\.test\.ts$/, ""))
+    );
+
+    // Allow certain trivial modules to be uncovered without penalty
+    const allowedUncovered = new Set(["config", "index"]);
+
+    for (const mod of srcModules) {
+      if (allowedUncovered.has(mod)) continue;
+      if (!testFiles.has(mod)) {
+        modulesWithoutTests.push(mod);
+      }
+    }
+
+    const totalNonTrivial = srcModules.filter(m => !allowedUncovered.has(m)).length;
+    const coveredCount = totalNonTrivial - modulesWithoutTests.length;
+    const coveragePercent = totalNonTrivial > 0 ? Math.round((coveredCount / totalNonTrivial) * 100) : 100;
+    testFileCoveragePass = coveragePercent >= 75;
+
+    gates.push({
+      gate: "test-file-coverage",
+      passed: testFileCoveragePass,
+      severity: "warning",
+      message: testFileCoveragePass
+        ? `Test file coverage: ${coveragePercent}% (${coveredCount}/${totalNonTrivial} modules have test files)`
+        : `Test file coverage too low: ${coveragePercent}% (${coveredCount}/${totalNonTrivial} modules). Uncovered: ${modulesWithoutTests.join(", ")}`,
+      detail: modulesWithoutTests.length > 0 ? `Modules without test files: ${modulesWithoutTests.join(", ")}` : undefined,
+    });
+  } else {
+    gates.push({
+      gate: "test-file-coverage",
+      passed: false,
+      severity: "warning",
+      message: "Cannot check test file coverage: src/ or src/__tests__/ directory missing",
+    });
+  }
+  // Deduct 3 points per uncovered module above the 25% threshold
+  if (!testFileCoveragePass && modulesWithoutTests.length > 0) {
+    const totalNonTrivial = readdirSync(srcDir)
+      .filter((f): f is string => typeof f === "string" && (f as string).endsWith(".ts") && (f as string) !== "index.ts")
+      .length;
+    const allowedMissing = Math.ceil(totalNonTrivial * 0.25);
+    const excessMissing = Math.max(0, modulesWithoutTests.length - allowedMissing);
+    score -= excessMissing * 3;
+  }
 
   const overallPassed = score >= 60 && !gates.some(g => g.severity === "critical" && !g.passed);
 

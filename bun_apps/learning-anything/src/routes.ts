@@ -24,6 +24,7 @@ import type { GraphStore } from "./graph.js";
 import { getEnv, LIMITS } from "./config.js";
 import * as agent from "./agent.js";
 import type { AgentMessage } from "./agent.js";
+import { AgentError } from "./agent.js";
 import { validateGraph } from "./validate.js";
 import { requestLogger, logResponse, rateLimiter, classifyError, checkResponseCache, storeResponseCache, invalidateResponseCache, getMetrics, getCacheSize, MAX_CACHE_ENTRIES } from "./middleware.js";
 import { createIgnoreFilter } from "./ignore.js";
@@ -31,6 +32,7 @@ import { generateHeuristicTour, type TourGroupingMode } from "./tour.js";
 import { cosineSimilarity } from "./semantic-search.js";
 import { contentHash } from "./fingerprint.js";
 import type { LLMLayerResponse } from "./layer-detector.js";
+import { normalizeBatchOutput } from "./normalize.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -43,6 +45,31 @@ function json(data: unknown, status = 200): Response {
 
 function error(message: string, status = 400): Response {
   return json({ error: message }, status);
+}
+
+/**
+ * Safely parse an integer query parameter with clamping.
+ * Returns `defaults.default` for null/NaN, clamps to [min, max].
+ */
+function parseIntParam(
+  value: string | null,
+  defaults: { default: number; min: number; max: number },
+): number {
+  if (value === null) return defaults.default;
+  const parsed = parseInt(value, 10);
+  if (isNaN(parsed)) return defaults.default;
+  return Math.max(defaults.min, Math.min(defaults.max, parsed));
+}
+
+/**
+ * Extract pagination parameters (offset + limit) from query string.
+ * Offset defaults to 0, limit defaults to 200 with a max cap.
+ */
+function parsePagination(query: URLSearchParams): { offset: number; limit: number } {
+  return {
+    offset: parseIntParam(query.get("offset"), { default: 0, min: 0, max: 100000 }),
+    limit: parseIntParam(query.get("limit"), { default: 200, min: 1, max: LIMITS.maxQueryResults }),
+  };
 }
 
 /**
@@ -95,6 +122,8 @@ type Handler = (
   query: URLSearchParams,
   body: unknown,
   graphStore: GraphStore,
+  signal?: AbortSignal,
+  requestId?: string,
 ) => Promise<Response> | Response;
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -109,9 +138,10 @@ const GET_ROUTES: Record<string, Handler> = {
 
   "api/nodes": async (_s, q, _b, gs) => {
     const type = q.get("type") ?? undefined;
-    const limit = parseInt(q.get("limit") ?? "200", 10);
-    const nodes = gs.getNodes(type).slice(0, Math.min(limit, LIMITS.maxQueryResults));
-    return json({ nodes, total: gs.getNodes(type).length });
+    const { offset, limit } = parsePagination(q);
+    const allNodes = gs.getNodes(type);
+    const nodes = allNodes.slice(offset, offset + limit);
+    return json({ nodes, total: allNodes.length, offset, limit });
   },
 
   "api/layers": async (_s, _q, _b, gs) => {
@@ -127,7 +157,7 @@ const GET_ROUTES: Record<string, Handler> = {
   "api/search": async (_s, q, _b, gs) => {
     const query = q.get("q");
     if (!query) return error("Missing query parameter: q");
-    const limit = parseInt(q.get("limit") ?? "50", 10);
+    const limit = parseIntParam(q.get("limit"), { default: 50, min: 1, max: 100 });
     const useIgnoreFilter = q.get("ignored") !== "false";
     let nodes = gs.search(query, limit);
     if (useIgnoreFilter) {
@@ -162,10 +192,10 @@ const GET_ROUTES: Record<string, Handler> = {
     return json({ stats, layerHealth });
   },
 
-  "api/explain": async (_s, q, _b, gs) => {
+  "api/explain": async (_s, q, _b, gs, signal) => {
     const path = q.get("path");
     if (!path) return error("Missing query parameter: path");
-    const result = await agent.explainNode(path, gs);
+    const result = await agent.explainNode(path, gs, "pro", signal);
     return json(result);
   },
 
@@ -199,7 +229,7 @@ const GET_ROUTES: Record<string, Handler> = {
     const embedding = embeddingStr.split(",").map(Number).filter(n => !isNaN(n));
     if (embedding.length === 0) return error("Invalid embedding values");
     const threshold = q.get("threshold") ? parseFloat(q.get("threshold")!) : undefined;
-    const limit = parseInt(q.get("limit") ?? "10", 10);
+    const limit = parseIntParam(q.get("limit"), { default: 10, min: 1, max: 100 });
     const typesStr = q.get("types");
     const types = typesStr ? typesStr.split(",") : undefined;
     const nodes = gs.semanticSearch(embedding, { threshold, limit, types });
@@ -264,7 +294,7 @@ async function handleDynamicGet(
     }
     if (suffix === "deps" || id.includes("/deps")) {
       const nodeId = id.replace(/\/deps$/, "");
-      const depth = parseInt(query.get("depth") ?? "3", 10);
+      const depth = parseIntParam(query.get("depth"), { default: 3, min: 1, max: 10 });
       const { nodes, edges } = graphStore.getDependencyTree(nodeId, depth);
       return json({ root: nodeId, nodes, edges });
     }
@@ -299,21 +329,21 @@ async function handleDynamicGet(
 }
 
 const POST_ROUTES: Record<string, Handler> = {
-  "api/chat": async (_s, _q, body, gs) => {
+  "api/chat": async (_s, _q, body, gs, signal, requestId) => {
     const validationErr = validateBody(body, ["messages"]);
     if (validationErr) return validationErr;
     const { messages, model } = body as { messages: AgentMessage[]; model?: string };
     if (!Array.isArray(messages) || messages.length === 0) return error("messages must be a non-empty array");
-    const result = await agent.chat(messages, model ?? "flash", gs);
+    const result = await agent.chat(messages, model ?? "flash", gs, signal, requestId);
     return json(result);
   },
 
-  "api/chat/stream": async (_s, _q, body, gs) => {
+  "api/chat/stream": async (_s, _q, body, gs, signal, requestId) => {
     const validationErr = validateBody(body, ["messages"]);
     if (validationErr) return validationErr;
     const { messages, model } = body as { messages: AgentMessage[]; model?: string };
     if (!Array.isArray(messages) || messages.length === 0) return error("messages must be a non-empty array");
-    const stream = await agent.chatStream(messages, model ?? "flash", gs);
+    const stream = await agent.chatStream(messages, model ?? "flash", gs, signal, requestId);
     return new Response(stream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
@@ -323,57 +353,57 @@ const POST_ROUTES: Record<string, Handler> = {
     });
   },
 
-  "api/analyze/root-cause": async (_s, _q, body, gs) => {
+  "api/analyze/root-cause": async (_s, _q, body, gs, signal, requestId) => {
     const validationErr = validateBody(body, ["problem"]);
     if (validationErr) return validationErr;
     const { problem, model } = body as { problem: string; model?: string };
-    const result = await agent.rootCauseAnalysis(problem, gs, model ?? "pro");
+    const result = await agent.rootCauseAnalysis(problem, gs, model ?? "pro", signal, requestId);
     return json(result);
   },
 
-  "api/analyze/architecture": async (_s, _q, body, gs) => {
+  "api/analyze/architecture": async (_s, _q, body, gs, signal, requestId) => {
     const { model } = (body as { model?: string }) ?? {};
-    const result = await agent.analyzeArchitecture(gs, model ?? "pro");
+    const result = await agent.analyzeArchitecture(gs, model ?? "pro", signal, requestId);
     return json(result);
   },
 
-  "api/workflow/design": async (_s, _q, body, gs) => {
+  "api/workflow/design": async (_s, _q, body, gs, signal, requestId) => {
     const validationErr = validateBody(body, ["goal"]);
     if (validationErr) return validationErr;
     const { goal, model } = body as { goal: string; model?: string };
-    const result = await agent.designWorkflow(goal, gs, model ?? "pro");
+    const result = await agent.designWorkflow(goal, gs, model ?? "pro", signal, requestId);
     return json(result);
   },
 
-  "api/explain": async (_s, _q, body, gs) => {
+  "api/explain": async (_s, _q, body, gs, signal, requestId) => {
     const validationErr = validateBody(body, ["path"]);
     if (validationErr) return validationErr;
     const { path, model } = body as { path: string; model?: string };
-    const result = await agent.explainNode(path, gs, model ?? "pro");
+    const result = await agent.explainNode(path, gs, model ?? "pro", signal, requestId);
     return json(result);
   },
 
-  "api/diff/analyze": async (_s, _q, body, gs) => {
+  "api/diff/analyze": async (_s, _q, body, gs, signal, requestId) => {
     const validationErr = validateBody(body, ["changedFiles"]);
     if (validationErr) return validationErr;
     const { changedFiles, model } = body as { changedFiles: string[]; model?: string };
     if (!Array.isArray(changedFiles) || changedFiles.length === 0) return error("changedFiles must be a non-empty array");
-    const result = await agent.analyzeDiff(changedFiles, gs, model ?? "pro");
+    const result = await agent.analyzeDiff(changedFiles, gs, model ?? "pro", signal, requestId);
     return json(result);
   },
 
-  "api/analyze/file": async (_s, _q, body, gs) => {
+  "api/analyze/file": async (_s, _q, body, gs, signal, requestId) => {
     const validationErr = validateBody(body, ["filePath", "content"]);
     if (validationErr) return validationErr;
     const { filePath, content, model } = body as { filePath: string; content: string; model?: string };
-    const result = await agent.analyzeFile(filePath, content, gs, model ?? "pro");
+    const result = await agent.analyzeFile(filePath, content, gs, model ?? "pro", signal, requestId);
     return json(result);
   },
 
-  "api/analyze/project-summary": async (_s, _q, body, gs) => {
+  "api/analyze/project-summary": async (_s, _q, body, gs, signal, requestId) => {
     gs.ensureLoaded();
     const { model } = (body as { model?: string }) ?? {};
-    const result = await agent.summarizeProject(gs, model ?? "pro");
+    const result = await agent.summarizeProject(gs, model ?? "pro", signal, requestId);
     return json(result);
   },
 
@@ -416,6 +446,29 @@ const POST_ROUTES: Record<string, Handler> = {
     }
   },
 
+  "api/graph/normalize": async (_s, _q, body) => {
+    const validationErr = validateBody(body, []);
+    if (validationErr) return validationErr;
+    const { nodes, edges } = body as {
+      nodes?: import("./graph.js").GraphNode[];
+      edges?: import("./graph.js").GraphEdge[];
+    };
+    if (!Array.isArray(nodes) && !Array.isArray(edges)) return error("Missing nodes or edges");
+    try {
+      const result = normalizeBatchOutput({
+        nodes: Array.isArray(nodes) ? nodes : [],
+        edges: Array.isArray(edges) ? edges : [],
+      });
+      return json({
+        nodes: result.nodes,
+        edges: result.edges,
+        stats: result.stats,
+      });
+    } catch (e) {
+      return error(`Normalization failed: ${(e as Error).message}`, 500);
+    }
+  },
+
   "api/tour/generate": async (_s, _q, body, gs) => {
     gs.ensureLoaded();
     const { mode, batchSize } = body as { mode?: TourGroupingMode; batchSize?: number };
@@ -452,6 +505,8 @@ const POST_ROUTES: Record<string, Handler> = {
 
   "api/graph/fingerprints/compute": async (_s, _q, body, gs) => {
     gs.ensureLoaded();
+    const validationErr = validateBody(body, []);
+    if (validationErr) return validationErr;
     const { projectDir } = body as { projectDir?: string };
     try {
       const store = gs.computeFingerprints(projectDir);
@@ -483,11 +538,11 @@ const POST_ROUTES: Record<string, Handler> = {
     }
   },
 
-  "api/layers/detect/llm": async (_s, _q, body, gs) => {
+  "api/layers/detect/llm": async (_s, _q, body, gs, signal, requestId) => {
     gs.ensureLoaded();
     const { model } = body as { model?: string };
     try {
-      const layers = await agent.detectLayersLLM(gs, model ?? "pro");
+      const layers = await agent.detectLayersLLM(gs, model ?? "pro", signal);
       // Also apply the layers to get node assignments
       const appliedLayers = gs.applyDetectedLLMLayers(layers);
       return json({
@@ -500,16 +555,31 @@ const POST_ROUTES: Record<string, Handler> = {
     }
   },
 
-  "api/tour/language-lesson": async (_s, _q, body, gs) => {
+  "api/tour/language-lesson": async (_s, _q, body, gs, signal, requestId) => {
     gs.ensureLoaded();
     const validationErr = validateBody(body, ["nodeId"]);
     if (validationErr) return validationErr;
     const { nodeId, language, model } = body as { nodeId: string; language?: string; model?: string };
     try {
-      const result = await agent.generateLanguageLesson(nodeId, gs, language ?? "TypeScript", model ?? "pro");
+      const result = await agent.generateLanguageLesson(nodeId, gs, language ?? "TypeScript", model ?? "pro", signal, requestId);
       return json(result);
     } catch (e) {
       return error(`Language lesson generation failed: ${(e as Error).message}`, 500);
+    }
+  },
+
+  "api/tour/generate/llm": async (_s, _q, body, gs, signal) => {
+    gs.ensureLoaded();
+    const { model } = body as { model?: string };
+    try {
+      const steps = await agent.detectTourLLM(gs, model ?? "pro", signal);
+      return json({
+        steps,
+        stepCount: steps.length,
+        mode: "llm",
+      });
+    } catch (e) {
+      return error(`LLM tour generation failed: ${(e as Error).message}`, 500);
     }
   },
 };
@@ -524,6 +594,71 @@ const limiter = rateLimiter({
 
 // ─── Router ──────────────────────────────────────────────────────────────────
 
+/** Dispatch to the correct route handler based on method + path. */
+async function dispatchRoute(
+  method: string, segments: string[], query: URLSearchParams,
+  request: Request, graphStore: GraphStore, signal: AbortSignal, requestId: string,
+): Promise<Response> {
+  if (method === "GET") {
+    const pathKey = segments.join("/");
+    const handler = GET_ROUTES[pathKey];
+    if (handler) {
+      return await handler(segments, query, null, graphStore, signal, requestId);
+    }
+    const dynamicResp = await handleDynamicGet(segments, query, graphStore);
+    return dynamicResp ?? error("Not found", 404);
+  }
+
+  if (method === "POST") {
+    const pathKey = segments.join("/");
+    const handler = POST_ROUTES[pathKey];
+    if (!handler) return error("Not found", 404);
+
+    // Reject oversized bodies before parsing
+    const contentLength = request.headers.get("content-length");
+    if (contentLength && parseInt(contentLength, 10) > LIMITS.maxBodySizeBytes) {
+      return error(`Request body exceeds maximum allowed size (${LIMITS.maxBodySizeBytes} bytes)`, 413);
+    }
+
+    let body: unknown = null;
+    const contentType = request.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      try {
+        body = await request.json();
+      } catch {
+        return error("Malformed JSON in request body", 400);
+      }
+    }
+    return await handler(segments, query, body, graphStore, signal, requestId);
+  }
+
+  return error("Method not allowed", 405);
+}
+
+/** Build an error response from a caught exception. */
+function buildErrorResponse(err: unknown, corsHeaders: Record<string, string>, elapsed: number, requestId: string): Response {
+  const errInfo = classifyError(err);
+  const agentMeta = err instanceof AgentError ? {
+    functionName: err.functionName,
+    model: err.model,
+    retryable: err.retryable,
+    category: err.category,
+  } : undefined;
+
+  return new Response(
+    JSON.stringify({
+      error: errInfo.message,
+      code: errInfo.code,
+      requestId,
+      ...(agentMeta ? { agent: agentMeta } : {}),
+    }),
+    {
+      status: errInfo.status,
+      headers: { "Content-Type": "application/json", ...corsHeaders, "X-Response-Time": `${elapsed}ms` },
+    },
+  );
+}
+
 export async function handleRequest(
   request: Request,
   graphStore: GraphStore,
@@ -531,13 +666,11 @@ export async function handleRequest(
   const { segments, query } = parsePath(request.url);
   const method = request.method;
   const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-    ?? request.headers.get("x-real-ip")
-    ?? "unknown";
+    ?? request.headers.get("x-real-ip") ?? "unknown";
 
-  // Middleware: request logging
   const ctx = requestLogger(method, segments.join("/"), clientIp);
 
-  // CORS
+  // CORS preflight
   if (method === "OPTIONS") {
     return new Response(null, {
       headers: {
@@ -554,11 +687,10 @@ export async function handleRequest(
     "X-Request-Id": ctx.requestId,
   };
 
-  // Middleware: rate limiting
+  // Rate limiting
   const rateResult = limiter.check(clientIp);
   corsHeaders["X-RateLimit-Remaining"] = String(rateResult.remaining);
   corsHeaders["X-RateLimit-Reset"] = String(rateResult.resetAt);
-
   if (!rateResult.allowed) {
     logResponse(ctx, 429);
     return new Response(
@@ -567,116 +699,42 @@ export async function handleRequest(
     );
   }
 
-  // Response cache: check for cached GET responses
+  // Response cache check for GET
   if (method === "GET") {
     const cached = checkResponseCache(method, ctx.path, query.toString(), request.headers.get("if-none-match"));
     if (cached) {
       const elapsed = Date.now() - ctx.startTime;
       logResponse(ctx, cached.status);
-      // Merge CORS headers
-      const mergedCacheHeaders: Record<string, string> = {
-        ...Object.fromEntries(cached.headers),
-        ...corsHeaders,
-        "X-Response-Time": `${elapsed}ms`,
-        "X-Cache": "HIT",
-      };
-      return new Response(cached.body, { status: cached.status, headers: mergedCacheHeaders });
+      return new Response(cached.body, {
+        status: cached.status,
+        headers: { ...Object.fromEntries(cached.headers), ...corsHeaders, "X-Response-Time": `${elapsed}ms`, "X-Cache": "HIT" },
+      });
     }
   }
 
   try {
-    let resp: Response;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), LIMITS.requestTimeoutMs);
+    request.signal?.addEventListener?.("abort", () => controller.abort());
 
-    if (method === "GET") {
-      const pathKey = segments.join("/");
+    const resp = await dispatchRoute(method, segments, query, request, graphStore, controller.signal, ctx.requestId);
+    clearTimeout(timeoutId);
 
-      // Try static routes first
-      const handler = GET_ROUTES[pathKey];
-      if (handler) {
-        resp = await handler(segments, query, null, graphStore);
-      } else {
-        // Try dynamic routes
-        const dynamicResp = await handleDynamicGet(segments, query, graphStore);
-        if (dynamicResp) {
-          resp = dynamicResp;
-        } else {
-          resp = error("Not found", 404);
-        }
-      }
-    } else if (method === "POST") {
-      const pathKey = segments.join("/");
-      const handler = POST_ROUTES[pathKey];
-      if (!handler) {
-        resp = error("Not found", 404);
-      } else {
-        let body: unknown = null;
-        const contentType = request.headers.get("content-type") ?? "";
-        if (contentType.includes("application/json")) {
-          try {
-            body = await request.json();
-          } catch {
-            resp = error("Malformed JSON in request body", 400);
-            // Add middleware headers to response
-            const elapsed = Date.now() - ctx.startTime;
-            const mergedHeaders: Record<string, string> = {
-              ...Object.fromEntries(resp.headers),
-              ...corsHeaders,
-              "X-Response-Time": `${elapsed}ms`,
-            };
-            logResponse(ctx, resp.status);
-            return new Response(resp.body, { status: resp.status, headers: mergedHeaders });
-          }
-        }
-        resp = await handler(segments, query, body, graphStore);
-      }
-    } else {
-      resp = error("Method not allowed", 405);
-    }
-
-    // Add middleware headers to response
     const elapsed = Date.now() - ctx.startTime;
     const mergedHeaders: Record<string, string> = {
-      ...Object.fromEntries(resp.headers),
-      ...corsHeaders,
-      "X-Response-Time": `${elapsed}ms`,
-      "X-Cache": "MISS",
+      ...Object.fromEntries(resp.headers), ...corsHeaders,
+      "X-Response-Time": `${elapsed}ms`, "X-Cache": "MISS",
     };
-
     logResponse(ctx, resp.status);
 
-    // Cache GET responses for future requests
+    // Cache successful GET responses
     if (method === "GET" && resp.status >= 200 && resp.status < 300) {
-      try {
-        const bodyText = await resp.clone().text();
-        storeResponseCache(method, ctx.path, query.toString(), bodyText, mergedHeaders);
-      } catch {
-        // Non-cacheable response body, skip caching
-      }
+      try { storeResponseCache(method, ctx.path, query.toString(), await resp.clone().text(), mergedHeaders); } catch { /* skip */ }
     }
-
-    return new Response(resp.body, {
-      status: resp.status,
-      headers: mergedHeaders,
-    });
+    return new Response(resp.body, { status: resp.status, headers: mergedHeaders });
   } catch (err) {
-    const errInfo = classifyError(err);
     const elapsed = Date.now() - ctx.startTime;
-    logResponse(ctx, errInfo.status);
-
-    return new Response(
-      JSON.stringify({
-        error: errInfo.message,
-        code: errInfo.code,
-        requestId: ctx.requestId,
-      }),
-      {
-        status: errInfo.status,
-        headers: {
-          "Content-Type": "application/json",
-          ...corsHeaders,
-          "X-Response-Time": `${elapsed}ms`,
-        },
-      },
-    );
+    logResponse(ctx, classifyError(err).status);
+    return buildErrorResponse(err, corsHeaders, elapsed, ctx.requestId);
   }
 }

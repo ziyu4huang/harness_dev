@@ -461,6 +461,7 @@ const REPORT_SCHEMA = {
         deltaKB: { type: 'number' },
       },
     },
+    testCountDelta: { type: 'number', description: 'Number of new tests added this iteration (current testCount - previous testCount)' },
     changesSummary: { type: 'string' },
     improvementsApplied: { type: 'number' },
     workflowImprovements: { type: 'number' },
@@ -493,6 +494,7 @@ const DIST_DIR = PROJECT_ROOT ? `${PROJECT_ROOT}/dist` : 'dist'
 const BUNDLE_PATH = `${DIST_DIR}/${BUNDLE_NAME}`
 const BUNDLE_MAP_PATH = `${DIST_DIR}/${BUNDLE_MAP_NAME}`
 const HISTORY_FILE = `${DIST_DIR}/learning-anything-metrics-history.json`
+const STALE_HISTORY_FILE = `${PROJECT_ROOT}/learning-anything-metrics-history.json`
 const WORKFLOW_FILE = PROJECT_ROOT ? `${PROJECT_ROOT}/${WORKFLOW_REL}` : WORKFLOW_REL
 const WORKFLOW_SCRIPTS = [
   `${APP_DIR}/scripts/audit.ts`,
@@ -500,11 +502,24 @@ const WORKFLOW_SCRIPTS = [
   `${APP_DIR}/scripts/benchmark.ts`,
 ]
 
+// Ensure dist/ exists and clean up stale root-level metrics file
+if (PROJECT_ROOT) {
+  await agent(
+    `Prepare the dist directory and clean up stale metrics file.
+    1. Create dist/ if missing: Bash("New-Item -ItemType Directory -Force -Path '${DIST_DIR}' | Out-Null")
+    2. If a stale metrics file exists at the project root (NOT in dist/), migrate it to dist/ and delete the stale copy:
+       Bash("if (Test-Path '${STALE_HISTORY_FILE}') { if (!(Test-Path '${HISTORY_FILE}')) { Move-Item '${STALE_HISTORY_FILE}' '${HISTORY_FILE}' } else { Remove-Item '${STALE_HISTORY_FILE}' } }")
+    Return "ok".`,
+    { label: 'ensure-dist', phase: 'Resolve', model: 'haiku' },
+  )
+}
+
 log(`Resolved paths:`)
 log(`  PROJECT_ROOT: ${PROJECT_ROOT || '(fallback)'}`)
 log(`  APP_DIR:      ${APP_DIR}`)
 log(`  DIST_DIR:     ${DIST_DIR}`)
 log(`  BUNDLE_PATH:  ${BUNDLE_PATH}`)
+log(`  HISTORY_FILE: ${HISTORY_FILE}`)
 
 // ─── Phase -0.5: Preflight health gate ────────────────────────────────────────
 
@@ -840,6 +855,26 @@ const GAP_CONTEXT = JSON.stringify(gapAnalysis, null, 2)
 // Store learned context for later phases
 const LEARNED_CONTEXT = JSON.stringify(learned, null, 2)
 
+// ─── Phase 0.75: Pre-iteration Convergence Gate ──────────────────────────────
+// If coverage is 100% with no gaps AND there's history showing non-regressed
+// previous iterations, skip the full iteration loop entirely.
+
+let preIterationConverged = false
+if (gaps.length === 0 && coverage.percentage >= 100 && allHistoricalRecords.length > 0) {
+  const lastRecord = allHistoricalRecords[allHistoricalRecords.length - 1]
+  const lastVerdict = lastRecord.verdict || ''
+  if (lastVerdict !== 'regressed' && lastVerdict !== 'blocked') {
+    preIterationConverged = true
+    convergenceReason = `Full coverage achieved (${coverage.percentage}%) with 0 gaps. Last iteration verdict: ${lastVerdict}.`
+    log(`\nPRE-ITERATION CONVERGENCE`)
+    log(`  ${convergenceReason}`)
+    log(`  Skipping ${MAX_ITERATIONS} iteration(s) — project is at full coverage.`)
+  }
+}
+
+// Track diff summaries across iterations for cross-iteration learning
+let iterationDiffSummaries = []
+
 // ─── Helper: run bun-app script ─────────────────────────────────────────────
 
 async function runBunScript(scriptName, iteration, phaseName, schema) {
@@ -888,8 +923,16 @@ let converged = false
 let previousModifiedFiles = [] // tracks files modified in previous iteration for Reflect optimization
 let convergenceReason = ''
 let gapsClosedThisIteration = 0
+let gapsRemainingAtStart = gaps.length // snapshot before any iteration
 
 for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+
+  // Pre-iteration convergence gate: skip if already at full coverage
+  if (preIterationConverged) {
+    log(`[${iteration}] SKIPPED — pre-iteration convergence active.`)
+    converged = true
+    break
+  }
 
   log(`\n${'═'.repeat(60)}`)
   log(`ITERATION ${iteration} of ${MAX_ITERATIONS}`)
@@ -960,6 +1003,102 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   log(`[${iteration}] Benchmark: ${passedTests}/${totalTests} passed`)
 
   // ====================================================================
+  // PHASE 4.1: Regression Detection Gate
+  // ====================================================================
+  // Compare build quality score and test pass rate against previous
+  // iteration BEFORE entering Reflect. If quality dropped or tests
+  // regressed, redirect Reflect to focus on root-cause analysis.
+  let regressionDetected = false
+  let regressionContext = ''
+  if (previousMetrics) {
+    const prevTestPassRate = previousMetrics.testPassRate || 0
+    const currentTestPassRate = totalTests > 0 ? passedTests / totalTests : 0
+    const qualityDrop = previousMetrics.qualityScore
+      ? (buildQualityScore - previousMetrics.qualityScore)
+      : 0
+    const testRateDrop = currentTestPassRate - prevTestPassRate
+
+    if (qualityDrop < -10) {
+      regressionDetected = true
+      log(`[${iteration}] REGRESSION GATE: Quality dropped by ${Math.abs(qualityDrop)} points (${previousMetrics.qualityScore} -> ${buildQualityScore})`)
+    } else if (testRateDrop < -0.1) {
+      regressionDetected = true
+      log(`[${iteration}] REGRESSION GATE: Test pass rate dropped by ${(testRateDrop * 100).toFixed(1)}% (${(prevTestPassRate * 100).toFixed(1)}% -> ${(currentTestPassRate * 100).toFixed(1)}%)`)
+    }
+
+    if (regressionDetected) {
+      regressionContext = `## REGRESSION DETECTED — CRITICAL
+
+Quality score: ${previousMetrics.qualityScore || '?'} -> ${buildQualityScore} (delta: ${qualityDrop >= 0 ? '+' : ''}${qualityDrop})
+Test pass rate: ${(prevTestPassRate * 100).toFixed(1)}% -> ${(currentTestPassRate * 100).toFixed(1)}% (delta: ${(testRateDrop * 100).toFixed(1)}%)
+Previous iteration verdict: ${previousMetrics.verdict || 'unknown'}
+
+**IMPORTANT**: Focus the Reflect phase EXCLUSIVELY on identifying and fixing this regression.
+- Do NOT plan new features or port UA features.
+- Analyze what changed since the previous iteration that caused the regression.
+- Prioritize root-cause analysis and targeted fixes only.
+`
+    }
+  }
+
+  // ====================================================================
+  // PHASE 4.5: Diff Summary (diff-aware context for Reflect)
+  // ====================================================================
+
+  // ── Test Stagnation Gate ──────────────────────────────────────────────────
+  // Track test growth and inject a context message if tests are stagnant.
+  const testCountDelta = totalTests - (previousMetrics?.testCount || 0)
+  let testStagnationContext = ''
+  if (testCountDelta <= 0 && previousMetrics?.testCountDelta !== undefined && previousMetrics.testCountDelta <= 0) {
+    testStagnationContext = `## TEST STAGNATION WARNING
+No new tests added for 2 consecutive iterations (${previousMetrics?.testCount || 0} -> ${totalTests}). Uncovered modules may remain. Prioritize adding tests for uncovered modules in the bunAppImprovements plan.`
+    log(`[${iteration}] TEST STAGNATION: No new tests for 2 iterations (${totalTests} total)`)
+  }
+  if (testCountDelta > 0) {
+    log(`[${iteration}] Tests added: +${testCountDelta} (${(previousMetrics?.testCount || 0)} -> ${totalTests})`)
+  }
+  let diffSummaryContext = ''
+  if (previousModifiedFiles.length > 0) {
+    log(`[${iteration}] Generating diff summary of changes since last iteration...`)
+    const diffSummary = await agent(
+      `Generate a concise diff summary of the changes made since the last iteration.
+
+      Run: Bash("cd ${APP_DIR} && git diff --stat -- ${previousModifiedFiles.map(f => f.replace(/^.*[\\/]src[\\/]/, 'src/')).join(' ')} 2>&1 || echo 'no changes'")
+      Run: Bash("cd ${APP_DIR} && git diff --unified=3 -- ${previousModifiedFiles.map(f => f.replace(/^.*[\\/]src[\\/]/, 'src/')).join(' ')} 2>&1 | head -100 || echo 'no diff'")
+
+      Return a concise summary of what changed, or "No changes since last iteration." if nothing changed.`,
+      { label: `diff-summary-${iteration}`, phase: 'Benchmark', model: 'haiku', schema: {
+        type: 'object',
+        properties: {
+          filesChanged: { type: 'array', items: { type: 'string' } },
+          summary: { type: 'string' },
+          linesAdded: { type: 'number' },
+          linesRemoved: { type: 'number' },
+        },
+        required: ['filesChanged', 'summary'],
+      }},
+    )
+    diffSummaryContext = `## Changes Since Last Iteration
+${diffSummary?.summary || 'No changes since last iteration.'}
+Files: ${(diffSummary?.filesChanged || []).join(', ') || 'none'}
+Lines: +${diffSummary?.linesAdded || 0} / -${diffSummary?.linesRemoved || 0}
+`
+    iterationDiffSummaries.push(diffSummary)
+  }
+
+  // Include previous iteration's Diff Source verification results
+  let previousDiffVerificationContext = ''
+  if (allHistoricalRecords.length > 0) {
+    const lastIter = allHistoricalRecords[allHistoricalRecords.length - 1]
+    if (lastIter.filesChanged && lastIter.filesChanged.length > 0) {
+      previousDiffVerificationContext = `\n## Previous Iteration Verified Changes
+Files modified in iteration ${allHistoricalRecords.length}: ${lastIter.filesChanged.join(', ')}
+Verdict: ${lastIter.verdict || 'unknown'}
+This data was verified by git diff comparison — trust these as confirmed changes.\n`
+    }
+  }
+
+  // ====================================================================
   // PHASE 5: Reflect (Opus)
   // ====================================================================
   phase('Reflect')
@@ -977,6 +1116,14 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     ${GAP_CONTEXT}
 
     ## Coverage: ${coverage.percentage}% (${coverage.bunAppCovered}/${coverage.uaTotalFeatures} UA features ported)
+
+    ${diffSummaryContext}
+
+    ${regressionContext}
+
+    ${testStagnationContext}
+
+    ${previousDiffVerificationContext}
 
     ## Current Audit
     Features: ${featureCount}, Source files: ${srcFiles}, Code: ${codeLines} lines
@@ -1142,6 +1289,11 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   const improvements = await agent(
     `Implement improvements to BOTH the learning-anything-server bun-app AND the development workflow.
 
+    ## DIRECTIVE: GAP CLOSURE (MANDATORY)
+    You MUST close at least 1 gap from the gap analysis this iteration. Pick the highest-priority gap that has effort=small. After implementing, verify the gap is closed by checking the relevant source files contain the new functionality. If no small-effort gaps remain, pick a medium-effort gap.
+    Current gaps: ${gaps.map(g => g.feature).join(', ')}
+    Small-effort gaps: ${gaps.filter(g => g.effort === 'small').map(g => g.feature).join(', ') || '(none)'}
+
     ## STEP 0: READ CURRENT SOURCE FILES (MANDATORY)
     Before writing ANY code, you MUST read each file you plan to modify. This prevents conflicts with existing implementations.
     Do NOT re-read all source files. Only read files you are about to modify.
@@ -1268,23 +1420,35 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     - If middleware.ts was claimed modified, check: Bash("grep -c 'generateETag\\|checkResponseCache\\|storeResponseCache\\|invalidateResponseCache\\|cleanup' ${APP_DIR}/src/middleware.ts")
     - If index.ts was claimed modified, check: Bash("grep -c 'cleanup\\|gracefulShutdown\\|dirty\\|fingerprints\\|layers/detect\\|language' ${APP_DIR}/src/index.ts")
 
+    Step 4: Cross-reference verified changes against the gap list from Gap Analysis.
+    The Improve phase was DIRECTED to close at least 1 gap. Check whether the claimed changes
+    actually address a specific gap by grepping for the new function/endpoint/type in the modified files.
+    If no gap was closed, flag this as a discrepancy.
+    Current gap list (features that need addressing):
+    ${JSON.stringify(gaps.map(g => ({ feature: g.feature, priority: g.priority, filesToModify: g.filesToModify || [], approach: g.approach })))}
+
+    For each verified change (confirmed file), check if it matches any gap's filesToModify or approach description.
+    List which gap features were DIRECTLY targeted by verified changes.
+
     Return JSON with:
     - verifiedFiles: array of { file, claimedStatus, verifiedStatus: 'confirmed'|'discrepancy', evidence: string }
     - actualChangedFiles: array of file paths from git diff
     - discrepancyCount: number of claimed changes not verified
     - verifiedBunAppChanges: number of bun-app changes confirmed (use this for gapsClosedThisIteration instead of self-reported data)
+    - gapsAddressed: array of gap feature names that were directly targeted by verified changes (only count changes that address specific gaps from the list above, NOT incidental changes like comments or renames)
 
-    Schema: { verifiedFiles: [...], actualChangedFiles: [...], discrepancyCount: number, verifiedBunAppChanges: number }`,
+    Schema: { verifiedFiles: [...], actualChangedFiles: [...], discrepancyCount: number, verifiedBunAppChanges: number, gapsAddressed: [string] }`,
     { label: `diff-source-${iteration}`, phase: 'Diff Source', model: 'haiku' },
   )
 
   const verifiedBunAppChanges = diffVerification?.verifiedBunAppChanges ?? bunAppChanges
   const actualChangedFiles = diffVerification?.actualChangedFiles || []
   const discrepancyCount = diffVerification?.discrepancyCount || 0
+  const gapsAddressedNames = diffVerification?.gapsAddressed || []
   if (discrepancyCount > 0) {
     log(`[${iteration}] WARNING: ${discrepancyCount} claimed changes not verified by diff!`)
   }
-  log(`[${iteration}] Diff verification: ${verifiedBunAppChanges} confirmed app changes, ${actualChangedFiles.length} files actually modified`)
+  log(`[${iteration}] Diff verification: ${verifiedBunAppChanges} confirmed app changes, ${actualChangedFiles.length} files actually modified, ${gapsAddressedNames.length} gaps addressed: ${gapsAddressedNames.join(', ') || '(none)'}`)
 
   // ====================================================================
   // PHASE 7: Regression
@@ -1350,9 +1514,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     Bundle: ${prevKB.toFixed(1)} → ${newKB.toFixed(1)} KB
     Improvements: ${bunAppChanges} app + ${workflowChanges} workflow
     Regression verdict: ${regressionVerdict}, count: ${regressionCount}
+    Tests: ${totalTests} total (${testCountDelta >= 0 ? '+' : ''}${testCountDelta} from previous ${previousMetrics?.testCount || 0})
     Previous: ${previousMetrics ? JSON.stringify(previousMetrics) : '(first)'}
 
-    Return: qualityScore { before, after, delta }, changesSummary, improvementsApplied, workflowImprovements, regressionsDetected, overallVerdict, nextSteps.`,
+    Return: qualityScore { before, after, delta }, testCountDelta, changesSummary, improvementsApplied, workflowImprovements, regressionsDetected, overallVerdict, nextSteps.`,
     { label: `report-${iteration}`, phase: 'Report', model: 'haiku', schema: REPORT_SCHEMA },
   )
 
@@ -1364,7 +1529,8 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     featureCount,
     testCount: totalTests,
     testPassed: passedTests,
-    improvementsApplied: bunAppChanges,
+    testCountDelta,
+    improvementsApplied: verifiedBunAppChanges,
     regressionsDetected: regressionCount,
     verdict: report?.overallVerdict || 'unknown',
     changesSummary: improvements?.summary || '',
@@ -1396,18 +1562,27 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   const qualityDelta = Math.abs(report?.qualityScore?.delta || 0)
 
   // remainingHighGaps is computed above, before the iteration record
-  // Compute gap closure: compare current remaining gaps to previous
-  const previousRemainingGaps = previousMetrics?.remainingGaps ?? gaps.length + 100 // assume many on first run
-  gapsClosedThisIteration = Math.max(0, previousRemainingGaps - gaps.length)
-  log(`[${iteration}] Gap closure: ${gapsClosedThisIteration} gaps closed this iteration (${previousRemainingGaps} → ${gaps.length} remaining)`)
+  // Compute gap closure: use gapsRemainingAtStart snapshot (set before iteration loop)
+  // and compare against current gaps remaining. Since gaps is set once by Gap Analysis,
+  // track verified changes as the proxy for gap closure.
+  const previousRemainingGaps = iteration === 1 ? gapsRemainingAtStart : (previousMetrics?.remainingGaps ?? gapsRemainingAtStart)
+  // Use gapsAddressed from Diff Source phase (source-file-level cross-referencing)
+  // instead of verifiedBunAppChanges as a proxy. This distinguishes targeted gap fixes
+  // from incidental changes (comments, renames, etc.)
+  const gapsAddressedCount = gapsAddressedNames.length
+  gapsClosedThisIteration = gapsAddressedCount > 0 ? gapsAddressedCount : (verifiedBunAppChanges > 0 ? Math.min(1, verifiedBunAppChanges) : 0)
+  log(`[${iteration}] Gap closure: ${gapsClosedThisIteration} gaps addressed (${gapsAddressedCount} directly targeted via file-level cross-reference, ${verifiedBunAppChanges} total verified changes)`)
+  if (testCountDelta > 0) {
+    log(`[${iteration}] Tests added: +${testCountDelta} (${previousMetrics?.testCount || 0} → ${totalTests})`)
+  }
 
-  if (totalChanges === 0 && remainingHighGaps === 0) {
+  if (totalChanges === 0 && remainingHighGaps === 0 && testCountDelta <= 0) {
     consecutiveLowDelta++
     if (consecutiveLowDelta >= CONVERGENCE_MAX_LOW_DELTAS) {
       converged = true
       convergenceReason = `No changes and no high-priority gaps for ${consecutiveLowDelta} consecutive iterations`
     }
-  } else if (qualityDelta < CONVERGENCE_DELTA_THRESHOLD && remainingHighGaps === 0) {
+  } else if (qualityDelta < CONVERGENCE_DELTA_THRESHOLD && remainingHighGaps === 0 && testCountDelta <= 0) {
     consecutiveLowDelta++
     if (consecutiveLowDelta >= CONVERGENCE_MAX_LOW_DELTAS) {
       converged = true
@@ -1434,6 +1609,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     stuckCounter = 0
     if (gapsClosedThisIteration > 0) {
       consecutiveZeroGapClosures = 0 // reset when gaps are actually closing
+    }
+    if (testCountDelta > 0) {
+      stuckCounter = 0 // reset stuck counter when tests are growing
+      log(`[${iteration}] Test growth resets stuck counter (delta: +${testCountDelta})`)
     }
   }
 

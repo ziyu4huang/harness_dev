@@ -21,6 +21,7 @@ import {
 import { classifyUpdate, type UpdateDecision } from "./change-classifier.js";
 import { detectLayers as detectLayersHeuristic, applyLLMLayers, type LLMLayerResponse } from "./layer-detector.js";
 import { detectLanguageConcepts, detectAllConcepts } from "./language-lesson.js";
+import { normalizeBatchOutput } from "./normalize.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -267,18 +268,40 @@ export class GraphStore {
       !removedNodeIds.has(e.source) && !removedNodeIds.has(e.target)
     );
 
+    // Normalize incoming nodes (fix IDs, complexity) but handle edges separately
+    // to avoid dropping edges whose targets exist in the existing graph but not
+    // in the new batch (normalizeBatchOutput's dangling-edge check is too aggressive
+    // for the merge case — it only sees the new nodes, not the full graph).
+    const normalized = normalizeBatchOutput({ nodes: newNodes, edges: [] });
+    const normalizedNewNodes = normalized.nodes;
+    const idMap = normalized.idMap; // maps old IDs → normalized IDs
+
+    // Rewrite edge references using the idMap from normalization, then validate
+    // against the FULL graph (existing + new), not just the new batch.
+    const allValidIds = new Set([
+      ...keptNodes.map(n => n.id),
+      ...normalizedNewNodes.map(n => n.id),
+    ]);
+    const normalizedNewEdges = newEdges
+      .map(e => ({
+        ...e,
+        source: idMap.get(e.source) ?? e.source,
+        target: idMap.get(e.target) ?? e.target,
+      }))
+      .filter(e => allValidIds.has(e.source) && allValidIds.has(e.target));
+
     // Deduplicate new nodes (by id)
     const existingIds = new Set(keptNodes.map(n => n.id));
-    const uniqueNewNodes = newNodes.filter(n => !existingIds.has(n.id));
+    const uniqueNewNodes = normalizedNewNodes.filter(n => !existingIds.has(n.id));
 
     // Deduplicate new edges (by source+target+type)
     const existingEdgeKeys = new Set(
       keptEdges.map(e => `${e.source}|${e.target}|${e.type}`)
     );
-    const uniqueNewEdges = newEdges.filter(e => {
+    const uniqueNewEdges = normalizedNewEdges.filter(e => {
       const key = `${e.source}|${e.target}|${e.type}`;
       if (existingEdgeKeys.has(key)) return false;
-      existingEdgeKeys.add(key); // prevent duplicates within newEdges too
+      existingEdgeKeys.add(key); // prevent duplicates within normalizedNewEdges too
       return true;
     });
 
@@ -289,14 +312,24 @@ export class GraphStore {
       edges: [...keptEdges, ...uniqueNewEdges],
     };
 
-    // Rebuild indexes
-    this.nodeIndex.clear();
+    // Incrementally update indexes instead of full rebuild
+    // Remove stale entries for removed nodes
+    for (const id of removedNodeIds) {
+      this.nodeIndex.delete(id);
+      // Remove edges by source/target that reference removed nodes
+      const srcEdges = this.edgesBySource.get(id);
+      if (srcEdges) {
+        this.edgesBySource.delete(id);
+      }
+      const tgtEdges = this.edgesByTarget.get(id);
+      if (tgtEdges) {
+        this.edgesByTarget.delete(id);
+      }
+    }
+
+    // Rebuild edge indexes from kept edges (edges may have been removed)
     this.edgesBySource.clear();
     this.edgesByTarget.clear();
-
-    for (const node of this.graph.nodes) {
-      this.nodeIndex.set(node.id, node);
-    }
     for (const edge of this.graph.edges) {
       const src = this.edgesBySource.get(edge.source) ?? [];
       src.push(edge);
@@ -306,11 +339,16 @@ export class GraphStore {
       this.edgesByTarget.set(edge.target, tgt);
     }
 
-    // Rebuild search engine
-    this.searchEngine = new SearchEngine(this.graph.nodes);
+    // Add new node entries
+    for (const node of uniqueNewNodes) {
+      this.nodeIndex.set(node.id, node);
+    }
 
-    // Rebuild semantic search engine
-    this.semanticSearchEngine = new SemanticSearchEngine(this.graph.nodes);
+    // Rebuild search engine only if nodes actually changed
+    if (uniqueNewNodes.length > 0 || removedNodeIds.size > 0) {
+      this.searchEngine = new SearchEngine(this.graph.nodes);
+      this.semanticSearchEngine = new SemanticSearchEngine(this.graph.nodes);
+    }
 
     this._dirty = true;
 
@@ -359,27 +397,44 @@ export class GraphStore {
     return [...outgoing, ...incoming];
   }
 
-  /** Get 1-hop neighborhood: node + all connected nodes + edges */
-  getNeighborhood(nodeId: string, maxNodes = 50): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  /** Get neighborhood: node + connected nodes + edges. Supports configurable depth. */
+  getNeighborhood(nodeId: string, maxNodes = 50, maxDepth = 1): { nodes: GraphNode[]; edges: GraphEdge[] } {
     const center = this.getNode(nodeId);
     if (!center) return { nodes: [], edges: [] };
 
-    const edges = this.getEdgesForNode(nodeId);
-    const neighborIds = new Set<string>();
-    for (const e of edges) {
-      neighborIds.add(e.source);
-      neighborIds.add(e.target);
-    }
-    neighborIds.delete(nodeId);
+    const visited = new Set<string>([nodeId]);
+    const allEdges: GraphEdge[] = [];
+    let frontier = new Set<string>([nodeId]);
 
+    for (let depth = 0; depth < maxDepth; depth++) {
+      const nextFrontier = new Set<string>();
+      for (const id of frontier) {
+        const edges = this.getEdgesForNode(id);
+        for (const e of edges) {
+          if (!allEdges.some(ae => ae.source === e.source && ae.target === e.target && ae.type === e.type)) {
+            allEdges.push(e);
+          }
+          const neighbor = e.source === id ? e.target : e.source;
+          if (!visited.has(neighbor)) {
+            nextFrontier.add(neighbor);
+          }
+        }
+      }
+      for (const id of nextFrontier) {
+        visited.add(id);
+      }
+      frontier = nextFrontier;
+    }
+
+    visited.delete(nodeId);
     const neighbors: GraphNode[] = [];
-    for (const id of neighborIds) {
+    for (const id of visited) {
       if (neighbors.length >= maxNodes - 1) break;
       const n = this.getNode(id);
       if (n) neighbors.push(n);
     }
 
-    return { nodes: [center, ...neighbors], edges };
+    return { nodes: [center, ...neighbors], edges: allEdges };
   }
 
   /** Fuzzy search across node names, summaries, tags, and language notes using Fuse.js */
@@ -426,12 +481,12 @@ export class GraphStore {
       .filter((n): n is GraphNode => n !== undefined);
   }
 
-  /** Get dependency graph for a node (imports/depends_on chain) */
-  getDependencyTree(nodeId: string, depth = 3): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  /** Get dependency graph for a node (imports/depends_on chain). Optional edgeTypes override. */
+  getDependencyTree(nodeId: string, depth = 3, edgeTypes?: string[]): { nodes: GraphNode[]; edges: GraphEdge[] } {
     const visited = new Set<string>();
     const nodes: GraphNode[] = [];
     const edges: GraphEdge[] = [];
-    const depEdgeTypes = ["imports", "depends_on", "calls"];
+    const depEdgeTypes = edgeTypes ?? ["imports", "depends_on", "calls"];
 
     const walk = (id: string, d: number) => {
       if (d <= 0 || visited.has(id)) return;
@@ -474,9 +529,15 @@ export class GraphStore {
       .filter((n): n is GraphNode => n !== undefined);
   }
 
-  /** Get 1-hop connected nodes excluding "contains" children */
-  getConnectedNodes(nodeId: string): { nodes: GraphNode[]; edges: GraphEdge[] } {
-    const edges = this.getEdgesForNode(nodeId).filter(e => e.type !== "contains");
+  /** Get 1-hop connected nodes, optionally filtering by edge types. Excludes "contains" children by default. */
+  getConnectedNodes(nodeId: string, edgeTypes?: string[]): { nodes: GraphNode[]; edges: GraphEdge[] } {
+    const excludeTypes = edgeTypes ? [] : ["contains"];
+    const includeTypes = edgeTypes ? new Set(edgeTypes) : null;
+    const edges = this.getEdgesForNode(nodeId).filter(e => {
+      if (excludeTypes.includes(e.type)) return false;
+      if (includeTypes && !includeTypes.has(e.type)) return false;
+      return true;
+    });
     const connectedIds = new Set<string>();
     for (const e of edges) {
       if (e.source === nodeId) connectedIds.add(e.target);

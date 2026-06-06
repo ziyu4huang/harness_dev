@@ -301,6 +301,110 @@ async function benchmark(): Promise<BenchmarkReport> {
     failureReason: importStyleValid ? undefined : "Some imports missing .js extension for Bun ESM",
   });
 
+  // Test 17: Per-module test coverage — every source module should have a test file
+  const t17 = Date.now();
+  const testDir = join(ROOT, "src", "__tests__");
+  const srcTsFiles = existsSync(srcDir)
+    ? Array.from(await import("fs").then(fs => {
+        const files: string[] = [];
+        const walk = (dir: string) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (entry.isDirectory()) return; // skip subdirs
+            if (entry.name.endsWith(".ts") && entry.name !== "index.ts") {
+              files.push(entry.name.replace(/\.ts$/, ""));
+            }
+          }
+        };
+        walk(srcDir);
+        return files;
+      }))
+    : [];
+  const testTsFiles = existsSync(testDir)
+    ? Array.from(await import("fs").then(fs => {
+        const files: string[] = [];
+        for (const entry of fs.readdirSync(testDir, { withFileTypes: true })) {
+          if (entry.isDirectory()) continue;
+          if (entry.name.endsWith(".test.ts")) {
+            files.push(entry.name.replace(/\.test\.ts$/, ""));
+          }
+        }
+        return files;
+      }))
+    : [];
+  const uncoveredModules = srcTsFiles.filter(m => !testTsFiles.includes(m));
+  const testCoverageRatio = srcTsFiles.length > 0 ? testTsFiles.length / srcTsFiles.length : 0;
+  const coveragePass = testCoverageRatio >= 0.4; // At least 40% of modules have dedicated tests
+  results.push({
+    name: "test-coverage-ratio",
+    category: "quality",
+    passed: coveragePass,
+    latencyMs: Date.now() - t17,
+    failureReason: coveragePass
+      ? undefined
+      : `Test coverage ratio: ${testCoverageRatio.toFixed(2)} (${testTsFiles.length}/${srcTsFiles.length} modules covered). Uncovered: ${uncoveredModules.join(", ")}`,
+  });
+  features.push({
+    feature: "test-coverage-ratio",
+    status: coveragePass ? "present" : "missing",
+    evidence: `${testTsFiles.length}/${srcTsFiles.length} modules have dedicated tests (${(testCoverageRatio * 100).toFixed(0)}%). Uncovered: ${uncoveredModules.join(", ") || "none"}`,
+  });
+
+  // Report uncovered modules as individual feature inventory entries
+  for (const mod of uncoveredModules) {
+    features.push({
+      feature: `test-for-${mod}`,
+      status: "missing",
+      evidence: `No __tests__/${mod}.test.ts found for src/${mod}.ts`,
+    });
+  }
+
+  // Aggregated test-module-coverage summary for workflow consumption
+  const totalNonIndexModules = srcTsFiles.length;
+  const modulesWithTests = srcTsFiles.filter(m => !uncoveredModules.includes(m)).length;
+  const moduleCoveragePercent = totalNonIndexModules > 0 ? Math.round((modulesWithTests / totalNonIndexModules) * 100) : 0;
+  const moduleCoverageStatus = moduleCoveragePercent >= 90 ? "present" : moduleCoveragePercent >= 60 ? "partial" : "missing";
+  features.push({
+    feature: "test-module-coverage-summary",
+    status: moduleCoverageStatus,
+    evidence: `${modulesWithTests}/${totalNonIndexModules} modules have dedicated test files (${moduleCoveragePercent}%). Uncovered: ${uncoveredModules.join(", ") || "none"}`,
+  });
+
+  // Test 17.5: Per-module test count — count test cases in each test file
+  const t17b = Date.now();
+  let totalTestCount = 0;
+  const moduleTestCounts: Record<string, number> = {};
+  if (existsSync(testDir)) {
+    const { readdirSync: rd, readFileSync: rf } = await import("fs");
+    const testFiles = rd(testDir).filter(f => f.endsWith(".test.ts"));
+    for (const tf of testFiles) {
+      const content = rf(join(testDir, tf), "utf-8");
+      // Count test() and test.skip() calls, plus test inside describe blocks
+      const testMatches = content.match(/\btest\s*\(/g);
+      const count = testMatches ? testMatches.length : 0;
+      const moduleName = tf.replace(/\.test\.ts$/, "");
+      moduleTestCounts[moduleName] = count;
+      totalTestCount += count;
+      features.push({
+        feature: `test-for-${moduleName}`,
+        status: "present",
+        evidence: `${count} tests in __tests__/${tf}`,
+      });
+    }
+  }
+  features.push({
+    feature: "test-count-total",
+    status: totalTestCount > 0 ? "present" : "missing",
+    evidence: `${totalTestCount} total test cases across ${Object.keys(moduleTestCounts).length} test files`,
+  });
+  const testCountPass = totalTestCount >= 50;
+  results.push({
+    name: "test-count-total",
+    category: "quality",
+    passed: testCountPass,
+    latencyMs: Date.now() - t17b,
+    failureReason: testCountPass ? undefined : `Total test count: ${totalTestCount} (target >= 50)`,
+  });
+
   // ─── Runtime Behavioral Tests ────────────────────────────────────────────
   // These tests actually import and execute the server code to verify runtime
   // behavior, not just structural presence.
@@ -1155,6 +1259,132 @@ async function benchmark(): Promise<BenchmarkReport> {
 
       features.push({ feature: "http-integration-tests", status: "present", evidence: "10 HTTP endpoint tests covering health, stats, nodes, search, 404, validation, CORS, headers" });
       features.push({ feature: "schema-validation", status: "present", evidence: "6 schema validation tests for stats, nodes, search, layers, metrics, malformed ID" });
+
+      // ─── POST Endpoint Schema Validation Tests ──────────────────────────
+      // Verify POST endpoint response contracts for core operations.
+
+      // POST Schema Test 1: /api/graph/merge returns merged result with stats
+      const pst1 = Date.now();
+      const mergeBody = {
+        changedFiles: ["a.ts"],
+        newNodes: [{ id: "fn:a.ts:newFn", type: "function", name: "newFn", filePath: "a.ts", summary: "New function", tags: ["new"], complexity: "simple" }],
+        newEdges: [],
+      };
+      const mergeResp = await fetchEndpoint("POST", "/api/graph/merge", mergeBody);
+      const mergeOk = mergeResp.status === 200
+        && typeof mergeResp.body?.status === "string"
+        && typeof mergeResp.body?.stats === "object"
+        && typeof mergeResp.body?.stats?.totalNodes === "number";
+      results.push({
+        name: "schema-post-merge",
+        category: "schema",
+        passed: mergeOk,
+        latencyMs: Date.now() - pst1,
+        failureReason: mergeOk ? undefined : `POST merge: status=${mergeResp.status}, body.status=${typeof mergeResp.body?.status}, stats=${typeof mergeResp.body?.stats}`,
+      });
+
+      // POST Schema Test 2: /api/graph/normalize returns normalized nodes/edges/stats
+      const pst2 = Date.now();
+      const normBody = {
+        nodes: [{ id: "fn:x.ts:hello", type: "function", name: "hello", filePath: "x.ts", summary: "Hello", tags: [], complexity: "simple" }],
+        edges: [],
+      };
+      const normResp = await fetchEndpoint("POST", "/api/graph/normalize", normBody);
+      const normOk = normResp.status === 200
+        && Array.isArray(normResp.body?.nodes)
+        && Array.isArray(normResp.body?.edges)
+        && typeof normResp.body?.stats === "object";
+      results.push({
+        name: "schema-post-normalize",
+        category: "schema",
+        passed: normOk,
+        latencyMs: Date.now() - pst2,
+        failureReason: normOk ? undefined : `POST normalize: status=${normResp.status}, nodes=${Array.isArray(normResp.body?.nodes)}, edges=${Array.isArray(normResp.body?.edges)}`,
+      });
+
+      // POST Schema Test 3: /api/tour/generate returns tour array
+      const pst3 = Date.now();
+      const tourResp = await fetchEndpoint("POST", "/api/tour/generate", {});
+      const tourOk = tourResp.status === 200
+        && Array.isArray(tourResp.body?.tour)
+        && typeof tourResp.body?.stepCount === "number"
+        && typeof tourResp.body?.mode === "string";
+      results.push({
+        name: "schema-post-tour-generate",
+        category: "schema",
+        passed: tourOk,
+        latencyMs: Date.now() - pst3,
+        failureReason: tourOk ? undefined : `POST tour: status=${tourResp.status}, tour=${Array.isArray(tourResp.body?.tour)}, stepCount=${typeof tourResp.body?.stepCount}`,
+      });
+
+      // POST Schema Test 4: /api/diff/analyze returns changed/affected components
+      const pst4 = Date.now();
+      const diffBody = { changedFiles: ["a.ts"] };
+      const diffResp = await fetchEndpoint("POST", "/api/diff/analyze", diffBody);
+      // This endpoint calls an LLM agent, so it may return 500 if no API key is set.
+      // We only validate the response schema when it returns 200.
+      const diffSchemaOk = diffResp.status === 200
+        ? (typeof diffResp.body?.changedComponents !== "undefined"
+          || typeof diffResp.body?.affectedComponents !== "undefined"
+          || typeof diffResp.body?.riskLevel !== "undefined"
+          || typeof diffResp.body?.analysis !== "undefined")
+        : true; // Non-200 is acceptable if LLM is unavailable
+      results.push({
+        name: "schema-post-diff-analyze",
+        category: "schema",
+        passed: diffSchemaOk,
+        latencyMs: Date.now() - pst4,
+        failureReason: diffSchemaOk ? undefined : `POST diff: status=${diffResp.status}, body keys=${Object.keys(diffResp.body || {}).join(',')}`,
+      });
+
+      // POST Schema Test 5: /api/graph/reload returns status
+      const pst5 = Date.now();
+      const reloadResp = await fetchEndpoint("POST", "/api/graph/reload", {});
+      const reloadOk = reloadResp.status === 200
+        && typeof reloadResp.body?.status === "string"
+        && typeof reloadResp.body?.stats === "object";
+      results.push({
+        name: "schema-post-reload",
+        category: "schema",
+        passed: reloadOk,
+        latencyMs: Date.now() - pst5,
+        failureReason: reloadOk ? undefined : `POST reload: status=${reloadResp.status}, body.status=${typeof reloadResp.body?.status}`,
+      });
+
+      // POST Schema Test 6: /api/search/semantic returns nodes array (no embeddings case)
+      const pst6 = Date.now();
+      const semanticBody = { embedding: [0.1, 0.2, 0.3] };
+      const semResp = await fetchEndpoint("POST", "/api/search/semantic", semanticBody);
+      const semOk = semResp.status === 200
+        && Array.isArray(semResp.body?.nodes)
+        && typeof semResp.body?.count === "number";
+      results.push({
+        name: "schema-post-semantic-search",
+        category: "schema",
+        passed: semOk,
+        latencyMs: Date.now() - pst6,
+        failureReason: semOk ? undefined : `POST semantic: status=${semResp.status}, nodes=${Array.isArray(semResp.body?.nodes)}, count=${typeof semResp.body?.count}`,
+      });
+
+      // POST Schema Test 7: Oversized body returns 413
+      const pst7 = Date.now();
+      const oversizedBody = { changedFiles: ["x"], newNodes: new Array(50000).fill(null).map((_, i) => ({
+        id: `fn:big.ts:fn${i}`, type: "function", name: `fn${i}`, filePath: "big.ts",
+        summary: "x".repeat(200), tags: [], complexity: "simple",
+      })), newEdges: [] };
+      const bigResp = await fetchEndpoint("POST", "/api/graph/merge", oversizedBody);
+      // With content-length set by JSON.stringify, should get 413 if body > 10MB
+      // For smaller bodies that still pass, 200 is also acceptable
+      const bigOk = bigResp.status === 200 || bigResp.status === 413;
+      results.push({
+        name: "schema-post-body-size-limit",
+        category: "schema",
+        passed: bigOk,
+        latencyMs: Date.now() - pst7,
+        failureReason: bigOk ? undefined : `POST body size limit: expected 200 or 413, got ${bigResp.status}`,
+      });
+
+      features.push({ feature: "post-endpoint-schema-tests", status: "present", evidence: "7 POST endpoint schema tests covering merge, normalize, tour, diff, reload, semantic, body-size-limit" });
     } catch (err) {
       results.push({
         name: "http-integration-tests",

@@ -267,3 +267,62 @@ describe("HTTP Integration Tests", () => {
     expect(status).toBe(400);
   });
 });
+
+// ─── Query Parameter Validation Tests ──────────────────────────────────────────
+
+describe("Query Parameter Validation", () => {
+  test("negative limit is clamped to 1", async () => {
+    const { status, body } = await fetchEndpoint("GET", "/api/nodes?limit=-5");
+    expect(status).toBe(200);
+    expect(body.limit).toBe(1);
+    expect(body.nodes.length).toBeLessThanOrEqual(1);
+  });
+
+  test("non-numeric limit returns default (200)", async () => {
+    const { status, body } = await fetchEndpoint("GET", "/api/nodes?limit=abc");
+    expect(status).toBe(200);
+    expect(body.limit).toBe(200);
+    expect(body.nodes.length).toBe(5); // all nodes
+  });
+
+  test("limit exceeding max is clamped to maxQueryResults", async () => {
+    const { status, body } = await fetchEndpoint("GET", "/api/nodes?limit=99999");
+    expect(status).toBe(200);
+    // maxQueryResults is 200 from config
+    expect(body.limit).toBe(200);
+  });
+
+  test("offset parameter works for pagination", async () => {
+    const { status, body } = await fetchEndpoint("GET", "/api/nodes?offset=3");
+    expect(status).toBe(200);
+    expect(body.offset).toBe(3);
+    expect(body.nodes.length).toBe(2); // 5 total - 3 offset = 2 remaining
+  });
+
+  test("offset + limit combination works", async () => {
+    const { status, body } = await fetchEndpoint("GET", "/api/nodes?offset=1&limit=2");
+    expect(status).toBe(200);
+    expect(body.offset).toBe(1);
+    expect(body.limit).toBe(2);
+    expect(body.nodes.length).toBe(2);
+  });
+
+  test("depth > 10 is clamped to 10", async () => {
+    const { status, body } = await fetchEndpoint("GET", "/api/nodes/file:a.ts?view=deps&depth=50");
+    expect(status).toBe(200);
+    // Should not error; depth was clamped internally
+    expect(body.root).toBe("file:a.ts");
+  });
+
+  test("negative depth is clamped to 1", async () => {
+    const { status, body } = await fetchEndpoint("GET", "/api/nodes/file:a.ts?view=deps&depth=-1");
+    expect(status).toBe(200);
+    expect(body.root).toBe("file:a.ts");
+  });
+
+  test("search limit is clamped to max 100", async () => {
+    const { status, body } = await fetchEndpoint("GET", "/api/search?q=auth&limit=500");
+    expect(status).toBe(200);
+    expect(body.nodes.length).toBeLessThanOrEqual(100);
+  });
+});
